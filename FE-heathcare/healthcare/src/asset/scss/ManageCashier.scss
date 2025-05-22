@@ -1,0 +1,20 @@
+.manage-cashier-container{
+    .td-action{
+        padding: 0 !important;
+        font-size: 24px;
+        .btn-update{
+            i {
+                color: rgb(227, 115, 71);
+            }
+        }
+        .btn-active{
+            i{
+                color: rgb(242, 16, 9);
+            }
+        }
+        span {
+            cursor: pointer;
+        }
+    }
+
+}

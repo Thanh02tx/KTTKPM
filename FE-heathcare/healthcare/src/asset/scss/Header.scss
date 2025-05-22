@@ -1,0 +1,42 @@
+.header-container {
+    height: 70px;
+    width: 100%;
+    background-color: #fff;
+    margin: 0 auto;
+    padding: 0 13%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    // .nav-bar{
+    //   font-size: 30px;
+    //   margin: 0 5px;
+    // }
+
+    .img-logo {
+      height: 70px; // hoặc height: 70px; tùy header của bạn
+      aspect-ratio: 3 / 1; // hoặc đặt width cố định như 180px
+      display: flex;
+      align-items: center;
+    
+      cursor: pointer;
+    
+      img {
+        height: 100%;
+        width: auto;
+        object-fit: contain;
+        display: block; // tránh thừa margin inline
+      }
+    }
+    .nav-bar{
+      font-size: 40px;
+      cursor: pointer;
+      margin-right: 5px;
+    }
+    .nav-right {
+      font-size: 26px;
+
+      .icon {
+        cursor: pointer;
+      }
+    }
+  }

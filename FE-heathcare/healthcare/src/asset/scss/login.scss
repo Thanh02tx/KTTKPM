@@ -1,0 +1,52 @@
+.login-container {
+    width: 100vw;
+    height: 100vh;
+    background: linear-gradient(135deg, rgba(34,193,195,1) 0%, rgba(253,187,45,1) 100%);
+    display: flex;
+    justify-content: center;  // căn giữa ngang
+    align-items: center;      // căn giữa dọc
+  
+    .content {
+      width: 400px;
+      height: 400px;
+      border: 1px solid red;
+      border-radius: 5%;
+      background-color: white;
+      padding:15px;
+      label{
+        font-size: 20px;
+        margin: 3px 0;
+      }
+
+      .bt-login{
+        width: 100%;
+        background: linear-gradient(135deg, rgba(34,193,195,1) 0%, rgba(253,187,45,1) 100%);
+        text-align: center;
+        margin-top: 15px;
+        padding:10px  5px;
+        border-radius: 20px;
+        border: none;
+        outline: none;
+      }
+      .s-password {
+        position: relative;
+        width: 100%;
+      
+        input {
+          width: 100%;
+          padding-right: 40px; /* chừa chỗ cho icon */
+        }
+      
+        span {
+          position: absolute;
+          top: 50%;
+          right: 10px;
+          transform: translateY(-50%);
+          cursor: pointer;
+          color: #555;
+        }
+      }
+      
+    }
+  }
+  

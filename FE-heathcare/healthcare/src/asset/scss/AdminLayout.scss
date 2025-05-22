@@ -1,0 +1,25 @@
+.admin-layout {
+  display: flex;
+  /* Sử dụng Flexbox để chia phần layout */
+  height: 100vh;
+  /* Chiều cao của layout sẽ bằng chiều cao của cửa sổ trình duyệt */
+
+  .nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 250px;
+    height: 100vh;
+    background-color: #ccc;
+  }
+
+  .content {
+    margin-left: 240px;
+    width: 100%;
+    background-color: #f9f6f6;
+    padding: 20px;
+    height: 100vh;
+    overflow-y: auto;
+    /* Cho phép cuộn khi nội dung dài */
+  }
+}

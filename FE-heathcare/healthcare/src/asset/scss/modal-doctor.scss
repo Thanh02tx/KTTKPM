@@ -1,0 +1,47 @@
+.react-datepicker-wrapper {
+    width: 100%;
+}
+
+.rdw-editor-main {
+    border: 1px solid #ddd;
+}
+
+.modal-doctor-body {
+    .avatar-wrapper {
+        position: relative;
+        width: 150px;
+        height: 150px;
+        margin: 0 auto;
+      
+        .avatar {
+          width: 100%;
+          height: 100%;
+          border-radius: 50%;
+          object-fit: cover;
+          border: 2px solid #ccc;
+        }
+      
+        .upload-btn {
+          position: absolute;
+          bottom: 0;
+          right: 0;
+          background-color: #007bff;
+          color: white;
+          border-radius: 50%;
+          width: 32px;
+          height: 32px;
+          font-size: 20px;
+          text-align: center;
+          line-height: 32px;
+          cursor: pointer;
+          border: 2px solid white;
+          transition: background-color 0.3s;
+      
+          &:hover {
+            background-color: #0056b3;
+          }
+        }
+      }
+      
+
+}

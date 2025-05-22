@@ -1,0 +1,68 @@
+.p-manage-appointment-container {
+    .ct-record {
+        .record-scroll {
+            max-height: 400px; // hoặc điều chỉnh tuỳ thiết kế
+            overflow-y: auto;
+            padding-right: 8px;
+
+            display: flex;
+            flex-wrap: wrap; // Cho phép các item-patient tự động xuống dòng khi không còn đủ không gian
+
+            .item-patient {
+                display: flex;
+                align-items: center;
+                border: 1px solid #dee2e6;
+                width: 250px;
+                border-radius: 8px;
+                padding: 10px;
+                margin-bottom: 10px;
+                background-color: #fff;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+                margin-right: 10px; // Thêm khoảng cách giữa các item nếu cần
+                cursor: pointer;
+
+                .image-wrapper {
+                    width: 80px;
+                    height: 80px;
+                    border-radius: 50%;
+                    overflow: hidden;
+                    flex-shrink: 0;
+                    margin-right: 12px;
+
+                    img.doctor-img {
+                        width: 100%;
+                        height: 100%;
+                        object-fit: cover;
+                        display: block;
+                    }
+                }
+
+                .info-wrapper {
+                    flex: 1;
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: center;
+
+                    div {
+                        font-size: 14px;
+                        color: #333;
+                        word-break: break-word;
+                    }
+                }
+            }
+        }
+    }
+    .item-app{
+        width: 180px;
+        border: 1px solid #ccc;
+        border-radius: 10px;
+        padding: 10px;
+        margin-right: 15px;
+        background: white;
+    }
+    .btn-view{
+        border-radius: 4px;
+        padding: 0 5px;
+        cursor: pointer;
+    }
+}

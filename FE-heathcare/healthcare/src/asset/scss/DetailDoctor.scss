@@ -1,0 +1,108 @@
+.detail-doctor-container {
+  // height: 100vh;
+  background-color: #eef1e6;
+  .container {
+    padding: 30px 15px;
+  }
+
+  .content {
+    background: #fff;
+    border-radius: 10px;
+    padding: 30px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+
+    .content-up {
+      display: flex;
+      align-items: flex-start;
+      gap: 30px;
+      margin-bottom: 30px;
+      padding-right: 25%;
+      box-sizing: border-box;
+
+      .img-wrapper {
+        flex: 0 0 25%;
+        max-width: 30%;
+        display: flex;
+        justify-content: center;
+
+        img.doctor-img {
+          width: 150px;
+          height: 150px;
+          border-radius: 50%;
+          object-fit: cover;
+          border: 3px solid #ccc;
+          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+        }
+      }
+
+      .title {
+        flex: 1;
+
+        h2 {
+          margin-bottom: 15px;
+          font-size: 24px;
+          font-weight: 600;
+          color: #333;
+        }
+
+        .description {
+          font-size: 16px;
+          color: #444;
+          line-height: 1.6;
+        }
+      }
+    }
+
+    .content-down {
+      border-top: 3px solid #ccc;
+      padding-top: 25px;
+      font-size: 16px;
+      color: #444;
+      line-height: 1.7;
+    }
+
+    .date-select {
+
+      select {
+        border: none;
+        outline: none;
+        padding-bottom: 3px;
+        border-bottom: 1px solid #ccc;
+        color: rgb(32, 67, 155);
+        font-size: 24px;
+        font-weight: 600;
+      }
+    }
+
+    .timeslot-ct {
+      display: flex;
+      flex-wrap: wrap; // Cho phép các item xuống dòng
+      gap: 10px; // Khoảng cách giữa các item
+      padding-right: 25%;
+      font-size: 20px;
+
+      .item-timeslot {
+        padding: 10px;
+        width: 150px;
+        border-radius: 5px;
+        background-color: #ccc;
+        cursor: pointer;
+        text-align: center;
+        transition: background-color 0.2s;
+
+        &:hover {
+          background-color: rgb(114, 58, 58); // ✅ Sửa đúng cú pháp
+          color: #fff;
+        }
+
+        &.is-full {
+          cursor: not-allowed;
+          background-color: #aaa;
+          font-weight: 600;
+        }
+      }
+    }
+
+
+  }
+}

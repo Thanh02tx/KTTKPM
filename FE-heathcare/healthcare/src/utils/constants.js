@@ -1,0 +1,5 @@
+path = {
+    HOME: '/',
+    LOGIN: '/login',
+    
+};
