@@ -1,28 +1,32 @@
-import requests
-import base64
-import mimetypes
 import os
 import uuid
 import time
-from django.conf import settings
-from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.decorators import api_view,parser_classes
-from rest_framework.response import Response
-from django.views.decorators.csrf import csrf_exempt
-from rest_framework import status
-from .models import TypeTest,TestRequest,TestResult
-from .serializers import TypeTestSerializer,TestRequestSerializer,TestResultSerializer
-from bson import ObjectId,errors
+import base64
+import mimetypes
+from io import BytesIO
 from datetime import datetime, timedelta
+
+import requests
+from bson import ObjectId, errors
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
+from email.generator import BytesGenerator
+
+from django.conf import settings
+from django.http import HttpResponse
 from django.utils.dateparse import parse_date
 from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from .models import TestRequest, TypeTest
-from rest_framework import status
-from bson import ObjectId
 
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.decorators import api_view, parser_classes
+
+from .models import TypeTest, TestRequest, TestResult
+from .serializers import TypeTestSerializer, TestRequestSerializer, TestResultSerializer
+from django.db import transaction
+import cloudinary.uploader
 URL_USER_SV = "http://localhost:8001"
 IMAGE_TESTRESULT=r"D:\final-microservice\image\test_result"
 
@@ -316,19 +320,19 @@ def create_test_requests(request):
 
     # 3. Xử lý dữ liệu request
     data = request.data
-    medical_record_id = data.get("medical_record_id")
+    medical_id = data.get("medical_id")
     list_type_test = data.get("listTypeTest", [])
 
-    if not medical_record_id or not list_type_test:
+    if not medical_id or not list_type_test:
         return Response({
             "errCode": 1,
-            "message": "Thiếu medical_record_id hoặc listTypeTest"
+            "message": "Thiếu medical_id hoặc listTypeTest"
         }, status=status.HTTP_400_BAD_REQUEST)
 
     created_requests = []
     for item in list_type_test:
         test_request = TestRequest.objects.create(
-            medical_record_id=medical_record_id,
+            medical_id=medical_id,
             typetest_id=item.get("id"),
             price=item.get("price")
         )
@@ -346,70 +350,77 @@ def create_test_requests(request):
 
 
 
-
 @api_view(['GET'])
 def get_test_requests_by_medical_record(request):
-    # Lấy medical_record_id từ query parameters
-    medical_record_id = request.GET.get('id')
+    medical_id = request.GET.get('id')
     
-    if not medical_record_id:
+    if not medical_id:
         return Response({
             'errCode': 1,
-            'message': 'Thiếu medical_record_id trong yêu cầu'
+            'message': 'Thiếu medical_id trong yêu cầu'
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    # Lấy tất cả TestRequest có medical_record_id tương ứng
-    test_requests = TestRequest.objects.filter(medical_record_id=medical_record_id)
+    test_requests = TestRequest.objects.filter(medical_id=medical_id)
 
-    # Nếu không tìm thấy bản ghi nào, trả về errCode: 0 và status 2xx, data là mảng rỗng
     if not test_requests:
         return Response({
             'errCode': 0,
-            'message': 'Không tìm thấy TestRequest với medical_record_id này',
-            'data': []  # Data là mảng rỗng
+            'message': 'Không tìm thấy TestRequest với medical_id này',
+            'data': []
         }, status=status.HTTP_200_OK)
 
-    # Dữ liệu cần trả về
     test_requests_data = []
     
     for test_request in test_requests:
-        # Lấy TypeTest object từ typetest_id
+        # Lấy tên xét nghiệm từ TypeTest
         try:
             type_test = TypeTest.objects.get(id=ObjectId(test_request.typetest_id))
             type_test_name = type_test.name
         except TypeTest.DoesNotExist:
-            type_test_name = 'N/A'  # Nếu không tìm thấy TypeTest, trả về 'N/A'
+            type_test_name = 'N/A'
+
+        # Tìm TestResult theo test_request_id
+        test_result = TestResult.objects.filter(test_request_id=str(test_request.id)).first()
+        result_data = None
+
+        if test_result:
+            result_data = {
+                'id': str(test_result.id),
+                'raw_image': test_result.raw_image,
+                'annotated_image': test_result.annotated_image,
+            }
 
         test_requests_data.append({
             'id': str(test_request.id),
             'price': test_request.price,
             'process_status': test_request.process_status,
-            'payment_status':test_request.payment_status,
-            'name': type_test_name  # Thêm name của typeTest vào dữ liệu trả về
+            'payment_status': test_request.payment_status,
+            'name': type_test_name,
+            'test_result': result_data  # Có thể là None nếu chưa có
         })
 
     return Response({
         'errCode': 0,
         'message': 'Lấy dữ liệu thành công',
-        'data': test_requests_data  # Trả về dữ liệu đã xử lý
+        'data': test_requests_data
     }, status=status.HTTP_200_OK)
 
 @api_view(['PUT'])
 def mark_test_requests_paid(request):
-    medical_record_id = request.data.get('id')
+    medical_id = request.data.get('id')
 
-    if not medical_record_id:
+    if not medical_id:
         return Response({
             "errCode": 1,
-            "message": "Thiếu medical_record_id"
+            "message": "Thiếu medical_id"
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    test_requests = TestRequest.objects.filter(medical_record_id=medical_record_id)
+    test_requests = TestRequest.objects.filter(medical_id=medical_id)
 
     if not test_requests.exists():
         return Response({
             "errCode": 1,
-            "message": "Không tìm thấy yêu cầu xét nghiệm nào với medical_record_id này"
+            "message": "Không tìm thấy yêu cầu xét nghiệm nào với medical_id này"
         }, status=status.HTTP_404_NOT_FOUND)
 
     for tr in test_requests:
@@ -421,12 +432,10 @@ def mark_test_requests_paid(request):
         "message": f"Đã cập nhật  TestRequest thành công",
     }, status=status.HTTP_200_OK)
     
-    
 @api_view(['POST'])
-@parser_classes([FormParser, MultiPartParser])
+@transaction.atomic
 def create_test_result(request):
     try:
-        # 1. Xác thực token
         token = request.headers.get('Authorization')
         if not token:
             return Response({"errCode": 1, "message": "Thiếu token"}, status=401)
@@ -448,14 +457,10 @@ def create_test_result(request):
         if not test_request:
             return Response({"errCode": 1, "message": "TestRequest không tồn tại"}, status=404)
 
-        # 2. Tạo bản sao dữ liệu để xử lý
         data = request.data.copy()
         data["technician_id"] = technician_id
 
-        # 3. Xử lý 2 ảnh: raw_image và annotated_image
-        save_dir = IMAGE_TESTRESULT
-        os.makedirs(save_dir, exist_ok=True)
-
+        # Upload ảnh lên Cloudinary
         for image_field in ['raw_image', 'annotated_image']:
             uploaded_file = request.FILES.get(image_field)
             if uploaded_file:
@@ -467,25 +472,18 @@ def create_test_result(request):
                             "message": f"Định dạng ảnh không hỗ trợ: {ext}"
                         }, status=400)
 
-                    timestamp = int(time.time())
-                    unique_id = uuid.uuid4().hex[:8]
-                    file_name = f"{timestamp}-{unique_id}{ext}"
-                    file_path = os.path.join(save_dir, file_name)
+                    # Upload lên Cloudinary
+                    result = cloudinary.uploader.upload(uploaded_file, folder="test_results/")
+                    data[image_field] = result.get('secure_url')  # Lưu URL ảnh
 
-                    with open(file_path, "wb+") as destination:
-                        for chunk in uploaded_file.chunks():
-                            destination.write(chunk)
-
-                    data[image_field] = file_name
                 except Exception as e:
                     return Response({
                         "errCode": 12,
-                        "message": f"Lỗi xử lý file {image_field}: {str(e)}"
+                        "message": f"Lỗi upload file {image_field} lên Cloudinary: {str(e)}"
                     }, status=400)
             else:
                 data[image_field] = ""
 
-        # 4. Lưu kết quả xét nghiệm
         serializer = TestResultSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
@@ -584,3 +582,25 @@ def get_annotated_image_test_result_by_test_request(request):
             'message': f'System error: {str(e)}',
             'data': []
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+@api_view(['GET'])
+def get_history_test_requests_by_medical_record(request):
+    # Lấy medical_id từ query parameters
+    medical_id = request.GET.get('id')
+    
+    if not medical_id:
+        return Response({
+            'errCode': 1,
+            'message': 'Thiếu medical_id trong yêu cầu'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Lấy tất cả TestRequest có medical_id tương ứng
+    test_requests = TestRequest.objects.filter(medical_id=medical_id)
+    return Response({
+        'errCode': 0,
+        'message': 'Lấy dữ liệu thành công',
+        'data': test_requests  # Trả về dữ liệu đã xử lý
+    }, status=status.HTTP_200_OK)

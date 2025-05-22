@@ -7,5 +7,8 @@ urlpatterns = [
     path('e/create-diagnosis-and-test-requests', views.create_diagnosis_and_test_requests, name='create_diagnosis_and_test_requests'),
     path('e/get-diagnosis-by-medical', views.get_diagnosis_by_medical_record, name='get_diagnosis_by_medical_record'),     
     path('e/doctor-update-diagnosis-and-status', views.doctor_update_diagnosis_and_status, name='doctor_update_diagnosis_and_status'),     
+    path('e/get-image-diagnosi-by-medical-id', views.get_image_diagnosi_by_medical_id, name='get_image_diagnosi_by_medical_id'), 
+    path('e/predict-heart', views.predict_heart, name='predict_heart'), 
+    
     
 ]

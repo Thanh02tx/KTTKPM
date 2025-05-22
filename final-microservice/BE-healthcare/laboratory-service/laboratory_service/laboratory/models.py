@@ -28,7 +28,7 @@ class TypeTest(models.Model):
 
 class TestRequest(models.Model):
     id = models.ObjectIdField(primary_key=True, default=ObjectId)
-    medical_record_id = models.CharField(max_length=100)
+    medical_id = models.CharField(max_length=100)
     typetest_id = models.CharField(max_length=100)
     price = models.CharField(max_length=100)
     payment_status = models.CharField(
@@ -60,8 +60,8 @@ class TestResult(models.Model):
     id = models.ObjectIdField(primary_key=True, default=ObjectId)
     test_request_id = models.CharField(max_length=100)  # Liên kết tới TestRequest  
     conclusion = models.TextField(blank=True, null=True)  # Kết luận (optional)
-    raw_image = models.CharField(max_length=100,blank=True,null=True)
-    annotated_image = models.CharField(max_length=100,blank=True,null=True)
+    raw_image = models.TextField()
+    annotated_image = models.TextField()
     technician_id= models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
 

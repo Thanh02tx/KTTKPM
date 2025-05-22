@@ -1474,33 +1474,263 @@ def get_history_appointments_by_patient(request):
     medical_records = MedicalRecord.objects.filter(patient_id=patient_id)
     if not medical_records:
         return Response({
-            "errCode": 11,
-            "message": "No medical records found for the provided patient_id"
-        }, status=status.HTTP_404_NOT_FOUND)
+            "errCode": 0,
+            "data":[]
+        }, status=status.HTTP_200_OK)
     
     result = []
     
     for medical_record in medical_records:
         # Lọc các appointment dựa trên medical_id
-        appointments = Appointment.objects.filter(medical_id=str(medical_record.id))
-        
-        for appointment in appointments:
-            # Chuyển đổi timeslot_id thành ObjectId
-            timeslot = TimeSlot.objects.filter(id=ObjectId(appointment.timeslot_id)).first()
+        appointment = Appointment.objects.filter(medical_id=str(medical_record.id)).first()
+        timeslot = TimeSlot.objects.filter(id=ObjectId(appointment.timeslot_id)).first()
             
-            if timeslot:
-                # Chuyển đổi schedule_id thành ObjectId và lấy schedule
-                schedule = Schedule.objects.filter(id=ObjectId(timeslot.schedule_id)).first()
+        if timeslot:
+            # Chuyển đổi schedule_id thành ObjectId và lấy schedule
+            schedule = Schedule.objects.filter(id=ObjectId(timeslot.schedule_id)).first()
                 
-                if schedule:
-                    result.append({
-                        "medical_id": str(medical_record.id),  # Thay appointment_id bằng medical_id
-                        "status": appointment.status,
-                        "schedule_date": schedule.date
-                    })
+            if schedule:
+                result.append({
+                    "medical_id": str(medical_record.id),  # Thay appointment_id bằng medical_id
+                    "status": appointment.status,                        
+                    "schedule_date": schedule.date
+                })
     
     return Response({
         "errCode": 0,
         "message": "Successfully fetched appointments and schedules",
+        "data": result
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+def get_doctor_weekly_schedule(request):
+    # Lấy token từ header Authorization, chuẩn hóa dạng "Bearer <token>"
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return Response({
+            "errCode": 1,
+            "message": "Missing Authorization token",
+            "data": []
+        }, status=status.HTTP_401_UNAUTHORIZED)
+
+    token = auth_header if auth_header.startswith("Bearer ") else f"Bearer {auth_header}"
+
+    try:
+        # Gọi User Service xác thực vai trò bác sĩ
+        response = requests.get(
+            f"{URL_USER_SV}/api/u/check-role-doctor",
+            headers={'Authorization': token}
+        )
+        json_resp = response.json()
+        if response.status_code != 200 or json_resp.get('errCode') != 0:
+            return Response({
+                "errCode": 1,
+                "message": "Bạn không có quyền truy cập với vai trò bác sĩ",
+                "data": []
+            }, status=status.HTTP_403_FORBIDDEN)
+        doctor_id_input = json_resp.get('user_id')
+    except Exception as e:
+        return Response({
+            "errCode": 1,
+            "message": f"Lỗi xác thực người dùng: {str(e)}",
+            "data": []
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Lấy tham số start_date
+    start_date_str = request.GET.get('start_date')
+    if not start_date_str:
+        return Response({
+            "errCode": 1,
+            "message": "Thiếu tham số start_date",
+            "data": []
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return Response({
+            "errCode": 1,
+            "message": "Định dạng ngày không hợp lệ. Dùng YYYY-MM-DD",
+            "data": []
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    result = []
+
+    # Lặp từng ngày trong tuần (7 ngày)
+    for i in range(7):
+        current_date = start_date + timedelta(days=i)
+
+        # Lấy lịch cho ngày hiện tại
+        schedules = Schedule.objects.filter(
+            doctor_id=str(doctor_id_input),
+            date=current_date
+        )
+
+        if schedules.exists():
+            for s in schedules:
+                # Lấy tên phòng (room_name)
+                room_name = ""
+                try:
+                    if s.room_id:
+                        room = Room.objects.get(id=ObjectId(s.room_id))
+                        room_name = room.name
+                except Exception:
+                    room_name = ""
+
+                nurse_name = ""
+                if s.nurse_id:
+                    try:
+                        r = requests.get(
+                            f"{URL_USER_SV}/api/u/get-nurse-by-user",
+                            params={"id": s.nurse_id}
+                        )
+                        r_json = r.json()
+                        if r_json.get("errCode") == 0:
+                            nurse_name = r_json.get("data", {}).get("name", "")
+                    except Exception:
+                        nurse_name = ""
+
+                result.append({
+                    'id': str(s.id),
+                    'doctor_id': s.doctor_id,
+                    'nurse_id': s.nurse_id,
+                    'date': current_date.strftime('%Y-%m-%d'),
+                    'room_id': s.room_id,
+                    'room_name': room_name,
+                    'nurse_name': nurse_name
+                })
+        else:
+            # Nếu không có lịch ngày đó thì trả về object rỗng
+            result.append({
+                'id': '',
+                'doctor_id': "",
+                'nurse_id': '',
+                'date': current_date.strftime('%Y-%m-%d'),
+                'room_id': '',
+                'room_name': '',
+                'nurse_name': ''
+            })
+
+    return Response({
+        "errCode": 0,
+        "message": "Lấy lịch làm việc thành công",
+        "data": result
+    }, status=status.HTTP_200_OK)
+    
+
+
+@api_view(['GET'])
+def get_nurse_weekly_schedule(request):
+    # Lấy token từ header Authorization, chuẩn hóa dạng "Bearer <token>"
+    auth_header = request.headers.get('Authorization')
+    if not auth_header:
+        return Response({
+            "errCode": 1,
+            "message": "Missing Authorization token",
+            "data": []
+        }, status=status.HTTP_401_UNAUTHORIZED)
+
+    token = auth_header if auth_header.startswith("Bearer ") else f"Bearer {auth_header}"
+
+    try:
+        # Gọi User Service xác thực vai trò bác sĩ
+        response = requests.get(
+            f"{URL_USER_SV}/api/u/check-role-nurse",
+            headers={'Authorization': token}
+        )
+        json_resp = response.json()
+        if response.status_code != 200 or json_resp.get('errCode') != 0:
+            return Response({
+                "errCode": 1,
+                "message": "Bạn không có quyền truy cập với vai trò bác sĩ",
+                "data": []
+            }, status=status.HTTP_403_FORBIDDEN)
+        nurse_id_input = json_resp.get('user_id')
+    except Exception as e:
+        return Response({
+            "errCode": 1,
+            "message": f"Lỗi xác thực người dùng: {str(e)}",
+            "data": []
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    # Lấy tham số start_date
+    start_date_str = request.GET.get('start_date')
+    if not start_date_str:
+        return Response({
+            "errCode": 1,
+            "message": "Thiếu tham số start_date",
+            "data": []
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return Response({
+            "errCode": 1,
+            "message": "Định dạng ngày không hợp lệ. Dùng YYYY-MM-DD",
+            "data": []
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    result = []
+
+    # Lặp từng ngày trong tuần (7 ngày)
+    for i in range(7):
+        current_date = start_date + timedelta(days=i)
+
+        # Lấy lịch cho ngày hiện tại
+        schedules = Schedule.objects.filter(
+            nurse_id=str(nurse_id_input),
+            date=current_date
+        )
+
+        if schedules.exists():
+            for s in schedules:
+                # Lấy tên phòng (room_name)
+                room_name = ""
+                try:
+                    if s.room_id:
+                        room = Room.objects.get(id=ObjectId(s.room_id))
+                        room_name = room.name
+                except Exception:
+                    room_name = ""
+
+                doctor_name = ""
+                if s.doctor_id:
+                    try:
+                        r = requests.get(
+                            f"{URL_USER_SV}/api/u/get-doctor-by-user",
+                            params={"id": s.doctor_id}
+                        )
+                        r_json = r.json()
+                        if r_json.get("errCode") == 0:
+                            doctor_name = r_json.get("data", {}).get("name", "")
+                    except Exception:
+                        doctor_name = ""
+
+                result.append({
+                    'id': str(s.id),
+                    'doctor_id': s.doctor_id,
+                    'nurse_id': s.nurse_id,
+                    'date': current_date.strftime('%Y-%m-%d'),
+                    'room_id': s.room_id,
+                    'room_name': room_name,
+                    'doctor_name': doctor_name
+                })
+        else:
+            # Nếu không có lịch ngày đó thì trả về object rỗng
+            result.append({
+                'id': '',
+                'doctor_id': "",
+                'nurse_id': '',
+                'date': current_date.strftime('%Y-%m-%d'),
+                'room_id': '',
+                'room_name': '',
+                'doctor_name': ''
+            })
+
+    return Response({
+        "errCode": 0,
+        "message": "Lấy lịch làm việc thành công",
         "data": result
     }, status=status.HTTP_200_OK)

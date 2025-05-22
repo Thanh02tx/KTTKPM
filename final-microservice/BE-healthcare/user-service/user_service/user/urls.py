@@ -20,6 +20,7 @@ urlpatterns = [
     path('u/get-all-doctor-admin',views.get_all_doctor_with_user_status,name='get_all_doctor_with_user_status'),
     path('u/change-active-user',views.change_active_user,name='change_active_user'),
     path('u/get-doctor',views.get_doctor,name='get_doctor'),
+    path('u/get-doctor-by-user',views.get_doctor_by_user,name='get_doctor_by_user'),
     path('u/get-doctor-by-token',views.get_doctor_by_token,name='get_doctor_by_token'),
     
     path('u/update-doctor',views.update_doctor,name='update_doctor'),
@@ -27,6 +28,11 @@ urlpatterns = [
     path('u/create-nurse',views.create_nurse,name='create_nurse'),
     path('u/get-all-nurse-admin',views.get_all_nurse_with_user_status,name='get_all_nurse_with_user_status'),
     path('u/get-nurse',views.get_nurse,name='get_nurse'),
+    path('u/get-nurse-by-user',views.get_nurse_by_user,name='get_nurse_by_user'),
+    path('u/get-nurse-by-token',views.get_nurse_by_token,name='get_nurse_by_token'),
+    path('u/update-nurse-token',views.update_nurse_token,name='update_nurse_token'),
+    path('u/update-doctor-token',views.update_doctor_token,name='update_doctor_token'),
+    
     path('u/update-nurse',views.update_nurse,name='update_nurse'),
     
     path('u/create-technician',views.create_technician,name='create_technician'),
@@ -35,17 +41,19 @@ urlpatterns = [
     path('u/get-all-technician-admin',views.get_all_technician_with_user_status,name='get_all_technician_with_user_status'),
     path('u/get-technician',views.get_technician,name='get_technician'),
     path('u/update-technician',views.update_technician,name='update_technician'),
+    path('u/update-technician-token',views.update_technician_token,name='update_technician_token'),
     
     path('u/create-pharmacist',views.create_pharmacist,name='create_pharmacist'),
     path('u/get-all-pharmacist-admin',views.get_all_pharmacist_with_user_status,name='get_all_pharmacist_with_user_status'),
     path('u/get-pharmacist',views.get_pharmacist,name='get_pharmacist'),
     path('u/update-pharmacist',views.update_pharmacist,name='update_pharmacist'),
+    path('u/update-pharmacist-token',views.update_pharmacist_token,name='update_pharmacist_token'),
     
     path('u/create-cashier',views.create_cashier,name='create_cashier'),
     path('u/get-all-cashier-admin',views.get_all_cashier_with_user_status,name='get_all_cashier_with_user_status'),
     path('u/get-cashier',views.get_cashier,name='get_cashier'),
     path('u/get-cashier-by-token',views.get_cashier_by_token,name='get_cashier_by_token'),
-    
+    path('u/update-cashier-token',views.update_cashier_token,name='update_cashier_token'),
     path('u/update-cashier',views.update_cashier,name='update_cashier'),
     
     path('u/get-select-all-nurse',views.get_select_all_nurse,name='get_select_all_nurse'),

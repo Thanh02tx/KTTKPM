@@ -31,7 +31,7 @@ class Prescription(models.Model):
         default='pending',
         help_text="Trạng thái đơn thuốc"
     )
-    image = models.CharField(max_length=100)
+    image = models.TextField(blank=True,null=True)
     note=models.TextField(blank=True,null=True)
     created_at = models.DateField(auto_now_add=True, help_text="Ngày tạo đơn thuốc")
 
@@ -88,7 +88,7 @@ class Invoice(models.Model):
     prescription = models.ForeignKey(Prescription, on_delete=models.CASCADE, help_text="Đơn thuốc được thanh toán")
     payment_method = models.ForeignKey(PaymentMethod, on_delete=models.SET_NULL, null=True, blank=True, help_text="Phương thức thanh toán")
     created_at = models.DateTimeField(auto_now_add=True, help_text="Thời gian tạo hóa đơn")
-    image = models.CharField(max_length=100,blank=True,null=True)
+    image = models.TextField(blank=True,null=True)
     def __str__(self):
         return f"Hóa đơn #{self.id} - Đơn thuốc #{self.prescription.id}"
 

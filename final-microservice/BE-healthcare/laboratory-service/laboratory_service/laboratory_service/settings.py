@@ -1,5 +1,9 @@
 from pathlib import Path
-
+import os
+from dotenv import load_dotenv
+import cloudinary
+import cloudinary.uploader
+load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = 'django-insecure-@!*fd3h37t+#u7ut_dl_o$*(b_f15!$^^wkj*f5+0br+1n@n*t'
@@ -36,13 +40,26 @@ INSTALLED_APPS = [
 
     # App của bạn
     'laboratory',
-
+    
     # Third-party packages
     'rest_framework',
     'corsheaders',
     'djongo',
+    'cloudinary',
+    'cloudinary_storage',
 ]
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.getenv('CLOUD_NAME'),
+    'API_KEY': os.getenv('API_KEY'),
+    'API_SECRET': os.getenv('API_SECRET'),
+}
 
+# ✅ Gọi cloudinary.config để cấu hình
+cloudinary.config(
+    cloud_name=CLOUDINARY_STORAGE['CLOUD_NAME'],
+    api_key=CLOUDINARY_STORAGE['API_KEY'],
+    api_secret=CLOUDINARY_STORAGE['API_SECRET']
+)
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  # CORS để trên cùng
     'django.middleware.common.CommonMiddleware',  # CommonMiddleware liền sau

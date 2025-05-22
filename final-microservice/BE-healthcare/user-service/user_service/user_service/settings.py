@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import cloudinary
 from dotenv import load_dotenv
 from datetime import timedelta
 
@@ -22,11 +23,29 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'rest_framework',  # Đảm bảo thêm cái này
-    'rest_framework_simplejwt',  # Đảm bảo thêm cái này
-    'corsheaders',  # Thêm để hỗ trợ CORS
-    'user',  # Đây là ứng dụng của bạn
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'corsheaders',
+    'user',
+    'cloudinary',
+    'cloudinary_storage',
 ]
+
+# ✅ Cloudinary config từ biến môi trường
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.getenv('CLOUD_NAME'),
+    'API_KEY': os.getenv('API_KEY'),
+    'API_SECRET': os.getenv('API_SECRET'),
+}
+
+# ✅ Gọi cloudinary.config để cấu hình
+cloudinary.config(
+    cloud_name=CLOUDINARY_STORAGE['CLOUD_NAME'],
+    api_key=CLOUDINARY_STORAGE['API_KEY'],
+    api_secret=CLOUDINARY_STORAGE['API_SECRET']
+)
+
+DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 
 # Cấu hình JWT
 REST_FRAMEWORK = {
@@ -38,16 +57,16 @@ REST_FRAMEWORK = {
     ],
 }
 
-# JWT Settings (đầy đủ)
+# JWT Settings
 SIMPLE_JWT = {
-    'ROTATE_REFRESH_TOKENS': False,  # Không sử dụng Refresh Token
-    'BLACKLIST_AFTER_ROTATION': True,  # Hủy bỏ token sau khi quay
-    'ALGORITHM': 'HS256',  # Sử dụng thuật toán HS256 cho JWT
-    'SIGNING_KEY': SECRET_KEY,  # Sử dụng SECRET_KEY từ môi trường
-    'AUTH_HEADER_TYPES': ('Bearer',),  # Đảm bảo rằng header là Bearer token
+    'ROTATE_REFRESH_TOKENS': False,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'AUTH_HEADER_TYPES': ('Bearer',),
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=365 * 100),  # Hạn sử dụng 100 năm cho access token
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=365 * 100),  # Tương tự cho refresh token
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=365 * 100),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=365 * 100),
 }
 
 # Middleware
@@ -56,17 +75,17 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',  # Đảm bảo có cái này
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    'corsheaders.middleware.CorsMiddleware',  # Đảm bảo có cái này
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-# CORS config cho frontend React
+# CORS config
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",  # URL của frontend React
-    "http://localhost:8002",  # Các dịch vụ khác có thể được phép truy cập
-    "http://localhost:8003", 
+    "http://localhost:3000",
+    "http://localhost:8002",
+    "http://localhost:8003",
     "http://localhost:8001",
     "http://localhost:8004",
     "http://localhost:8005",
@@ -106,11 +125,11 @@ WSGI_APPLICATION = 'user_service.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'user_db',  # Tên cơ sở dữ liệu của bạn
-        'USER': 'root',  # Tên người dùng MySQL
-        'PASSWORD': '123456',  # Mật khẩu người dùng MySQL
-        'HOST': 'localhost',  # Địa chỉ host (localhost nếu cài đặt trên máy tính của bạn)
-        'PORT': '3306',  # Cổng MySQL
+        'NAME': 'user_db',
+        'USER': 'root',
+        'PASSWORD': '123456',
+        'HOST': 'localhost',
+        'PORT': '3306',
     }
 }
 
@@ -131,7 +150,7 @@ USE_TZ = True
 # Custom user model
 AUTH_USER_MODEL = 'user.User'
 
-# Static
+# Static files
 STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

@@ -5,6 +5,9 @@ import uuid
 import logging
 import base64
 import mimetypes
+import re
+import  cloudinary.uploader
+from urllib.parse import urlparse
 # 🔹 Third-party Libraries
 import jwt
 from rest_framework import status
@@ -318,42 +321,28 @@ def check_doctor_role(request):
 
 
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def create_doctor(request):
     try:
-        # 📌 Lấy token từ header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
-
-        token = auth_header.split(" ")[1]
-
-        try:
-            decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            user_id = decoded.get('user_id')
-            if not user_id:
-                return Response({"errCode": 7, "message": "Token không chứa user_id"}, status=status.HTTP_401_UNAUTHORIZED)
-
-            User = get_user_model()
-            user = User.objects.get(id=user_id)
-
-            if user.role != 'admin':
-                return Response({"errCode": 4, "message": "Bạn không có quyền tạo bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
-
-        except jwt.ExpiredSignatureError:
-            return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-        except jwt.InvalidTokenError:
-            return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
-        except User.DoesNotExist:
-            return Response({"errCode": 8, "message": "Người dùng không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
+        user = request.user
+        if user.role != 'admin':
+            return Response({
+                "errCode": 4,
+                "message": "Bạn không có quyền tạo bác sĩ"
+            }, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data.copy()
+        User = get_user_model()
 
         # 📌 Kiểm tra email đã tồn tại chưa
         if User.objects.filter(email=data.get("email")).exists():
-            return Response({"errCode": 9, "message": "Email đã được sử dụng"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "errCode": 9,
+                "message": "Email đã được sử dụng"
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Xử lý ảnh base64
+        # ✅ Xử lý ảnh base64 upload lên Cloudinary
         image_base64 = data.get("image")
         if not image_base64 or image_base64.strip() == "":
             return Response({
@@ -364,29 +353,37 @@ def create_doctor(request):
         try:
             if "base64," in image_base64:
                 format_info, imgstr = image_base64.split(";base64,")
-                mime_type = format_info.split(":")[-1].lower()  # ví dụ: image/png
+                mime_type = format_info.split(":")[-1].lower()
                 ext = mimetypes.guess_extension(mime_type) or '.jpg'
-                ext = ext.lstrip('.')  # bỏ dấu chấm
+                ext = ext.lstrip('.')
             else:
                 imgstr = image_base64
-                ext = "jpg"  # fallback
+                ext = "jpg"
 
             if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
                 return Response({
                     "errCode": 11,
-                    "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                    "message": f"Định dạng ảnh không hỗ trợ: {ext}"
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             timestamp = int(time.time())
-            unique_id = uuid.uuid4().hex[:8]
-            file_name = f"{timestamp}-{unique_id}.{ext}"
+            unique_id = uuid.uuid4().hex[:16]
+            cloud_name = f"doctor_{timestamp}_{unique_id}"
 
-            os.makedirs(IMAGE_DOCTOR, exist_ok=True)
-            image_path = os.path.join(IMAGE_DOCTOR, file_name)
-            with open(image_path, "wb") as f:
-                f.write(base64.b64decode(imgstr))
+            upload_result = cloudinary.uploader.upload(
+                base64.b64decode(imgstr),
+                public_id=cloud_name,
+                folder="doctors"
+            )
 
-            data["image"] = file_name  # lưu tên file vào DB
+            image_url = upload_result.get("secure_url")
+            if image_url:
+                data["image"] = image_url
+            else:
+                return Response({
+                    "errCode": 13,
+                    "message": "Không lấy được URL ảnh từ Cloudinary"
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         except Exception as e:
             return Response({
@@ -395,7 +392,7 @@ def create_doctor(request):
                 "error": str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Tạo user mới cho bác sĩ
+        # ✅ Tạo user mới cho bác sĩ
         new_user = User.objects.create_user(
             email=data.get("email"),
             password=data.get("password"),
@@ -403,7 +400,7 @@ def create_doctor(request):
         )
         data["user"] = new_user.id
 
-        # 📌 Tạo bác sĩ
+        # ✅ Tạo bác sĩ
         serializer = DoctorSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
@@ -422,14 +419,6 @@ def create_doctor(request):
         }, status=status.HTTP_400_BAD_REQUEST)
 
     except Exception as e:
-        return Response({
-            "errCode": 2,
-            "message": "Lỗi hệ thống",
-            "error": str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    except Exception as e:
-        logger.error(f"Lỗi tạo bác sĩ: {e}")
         return Response({
             "errCode": 2,
             "message": "Lỗi hệ thống",
@@ -531,6 +520,57 @@ def change_active_user(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         
+# @api_view(['GET'])
+# @permission_classes([AllowAny])
+# def get_doctor(request):
+#     try:
+#         doctor_id = request.GET.get('id')
+#         if not doctor_id:
+#             return Response({
+#                 "errCode": 3,
+#                 "message": "Thiếu ID bác sĩ"
+#             }, status=400)
+
+#         doctor = Doctor.objects.get(id=doctor_id)
+
+#         data = model_to_dict(doctor)
+
+#         # Đọc ảnh và chuyển sang base64 định dạng chuẩn
+#         data['image_name']=doctor.image
+#         image_base64 = ""
+#         if doctor.image:
+#             image_path = os.path.join(IMAGE_DOCTOR, doctor.image)
+#             if os.path.exists(image_path):
+#                 mime_type, _ = mimetypes.guess_type(image_path)
+#                 if mime_type:
+#                     with open(image_path, 'rb') as img_file:
+#                         encoded = base64.b64encode(img_file.read()).decode('utf-8')
+#                         image_base64 = f"data:{mime_type};base64,{encoded}"
+
+#         data['image'] = image_base64
+
+#         return Response({
+#             "errCode": 0,
+#             "message": "Lấy bác sĩ thành công",
+#             "method": request.method,
+#             "data": data
+#         }, status=200)
+
+#     except Doctor.DoesNotExist:
+#         return Response({
+#             "errCode": 1,
+#             "message": "Không tìm thấy bác sĩ",
+#             "data": {}
+#         }, status=404)
+
+#     except Exception as e:
+#         return Response({
+#             "errCode": 2,
+#             "message": "Lỗi hệ thống",
+#             "method": request.method,
+#             "error": str(e),
+#             "data": {}
+#         }, status=500)
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_doctor(request):
@@ -546,19 +586,14 @@ def get_doctor(request):
 
         data = model_to_dict(doctor)
 
-        # Đọc ảnh và chuyển sang base64 định dạng chuẩn
-        data['image_name']=doctor.image
-        image_base64 = ""
-        if doctor.image:
-            image_path = os.path.join(IMAGE_DOCTOR, doctor.image)
-            if os.path.exists(image_path):
-                mime_type, _ = mimetypes.guess_type(image_path)
-                if mime_type:
-                    with open(image_path, 'rb') as img_file:
-                        encoded = base64.b64encode(img_file.read()).decode('utf-8')
-                        image_base64 = f"data:{mime_type};base64,{encoded}"
+        # Lấy tên ảnh (đã tự động lưu trên Cloudinary)
+        data['image_name'] = doctor.image
 
-        data['image'] = image_base64
+        # Trường `doctor.image` đã lưu URL của ảnh, không cần thêm `.url`
+        if doctor.image:
+            data['image'] = doctor.image
+        else:
+            data['image'] = None
 
         return Response({
             "errCode": 0,
@@ -583,26 +618,116 @@ def get_doctor(request):
             "data": {}
         }, status=500)
         
+# @api_view(['PUT'])
+# @transaction.atomic
+# def update_doctor(request):
+#     try:
+#         auth_header = request.headers.get('Authorization')
+#         if not auth_header or not auth_header.startswith("Bearer "):
+#             return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
+
+#         token = auth_header.split(" ")[1]
+#         decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+#         user_id = decoded.get('user_id')
+
+#         User = get_user_model()
+#         user = User.objects.get(id=user_id)
+
+#         if user.role != 'admin':
+#             return Response({"errCode": 4, "message": "Bạn không có quyền cập nhật bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
+
+#         data = request.data.copy()
+#         doctor_id = data.get("id")
+#         if not doctor_id:
+#             return Response({"errCode": 5, "message": "Thiếu id bác sĩ"}, status=status.HTTP_400_BAD_REQUEST)
+
+#         doctor = Doctor.objects.filter(id=doctor_id).first()
+#         if not doctor:
+#             return Response({"errCode": 6, "message": "Không tìm thấy bác sĩ"}, status=status.HTTP_404_NOT_FOUND)
+
+#         # ✅ Xoá ảnh cũ
+#         old_image_name = data.get("image_name")
+#         if old_image_name:
+#             old_path = os.path.join(IMAGE_DOCTOR, old_image_name)
+#             if os.path.exists(old_path):
+#                 os.remove(old_path)
+
+#         # ✅ Xử lý ảnh mới
+#         image_base64 = data.get("image")
+#         if image_base64 and image_base64.strip() != "":
+#             try:
+#                 if "base64," in image_base64:
+#                     format_info, imgstr = image_base64.split(";base64,")
+#                     mime_type = format_info.split(":")[-1].lower()
+#                     ext = mimetypes.guess_extension(mime_type) or '.jpg'
+#                     ext = ext.lstrip('.')
+#                 else:
+#                     imgstr = image_base64
+#                     ext = "jpg"
+
+#                 if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+#                     return Response({
+#                         "errCode": 11,
+#                         "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+#                     }, status=status.HTTP_400_BAD_REQUEST)
+
+#                 timestamp = int(time.time())
+#                 unique_id = uuid.uuid4().hex[:8]
+#                 file_name = f"{timestamp}-{unique_id}.{ext}"
+
+#                 os.makedirs(IMAGE_DOCTOR, exist_ok=True)
+#                 image_path = os.path.join(IMAGE_DOCTOR, file_name)
+#                 with open(image_path, "wb") as f:
+#                     f.write(base64.b64decode(imgstr))
+
+#                 data["image"] = file_name  # cập nhật ảnh mới vào DB
+#             except Exception as e:
+#                 return Response({
+#                     "errCode": 12,
+#                     "message": "Lỗi xử lý ảnh base64",
+#                     "error": str(e)
+#                 }, status=status.HTTP_400_BAD_REQUEST)
+
+#         # ✅ Cập nhật bác sĩ
+#         serializer = DoctorSerializer(doctor, data=data, partial=True)
+#         if serializer.is_valid():
+#             serializer.save()
+#             return Response({
+#                 "errCode": 0,
+#                 "message": "Cập nhật bác sĩ thành công",
+#                 "data": serializer.data
+#             }, status=status.HTTP_200_OK)
+
+#         return Response({
+#             "errCode": 2,
+#             "message": "Lỗi dữ liệu đầu vào",
+#             "errors": serializer.errors
+#         }, status=status.HTTP_400_BAD_REQUEST)
+
+#     except jwt.ExpiredSignatureError:
+#         return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
+#     except jwt.InvalidTokenError:
+#         return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
+#     except Exception as e:
+#         return Response({
+#             "errCode": 99,
+#             "message": "Lỗi không xác định",
+#             "error": str(e)
+#         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 @api_view(['PUT'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def update_doctor(request):
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
-
-        token = auth_header.split(" ")[1]
-        decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-        user_id = decoded.get('user_id')
-
-        User = get_user_model()
-        user = User.objects.get(id=user_id)
-
+        user = request.user
         if user.role != 'admin':
             return Response({"errCode": 4, "message": "Bạn không có quyền cập nhật bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data.copy()
         doctor_id = data.get("id")
+
         if not doctor_id:
             return Response({"errCode": 5, "message": "Thiếu id bác sĩ"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -610,17 +735,17 @@ def update_doctor(request):
         if not doctor:
             return Response({"errCode": 6, "message": "Không tìm thấy bác sĩ"}, status=status.HTTP_404_NOT_FOUND)
 
-        # ✅ Xoá ảnh cũ
-        old_image_name = data.get("image_name")
-        if old_image_name:
-            old_path = os.path.join(IMAGE_DOCTOR, old_image_name)
-            if os.path.exists(old_path):
-                os.remove(old_path)
-
-        # ✅ Xử lý ảnh mới
         image_base64 = data.get("image")
         if image_base64 and image_base64.strip() != "":
             try:
+                # ❌ Xoá ảnh cũ trên Cloudinary nếu có
+                old_image_url = doctor.image
+                match = re.search(r'/upload/(?:v\d+/)?(?P<public_id>.+?)\.(?:jpg|jpeg|png|gif|webp)', old_image_url)
+                if match:
+                    public_id = match.group('public_id')  # ví dụ: 'doctors/doctor_...'
+                    cloudinary.uploader.destroy(public_id)
+
+                # ✅ Xử lý ảnh base64 mới
                 if "base64," in image_base64:
                     format_info, imgstr = image_base64.split(";base64,")
                     mime_type = format_info.split(":")[-1].lower()
@@ -633,27 +758,36 @@ def update_doctor(request):
                 if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
                     return Response({
                         "errCode": 11,
-                        "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                        "message": f"Định dạng ảnh không hỗ trợ: {ext}"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 timestamp = int(time.time())
-                unique_id = uuid.uuid4().hex[:8]
-                file_name = f"{timestamp}-{unique_id}.{ext}"
+                unique_id = uuid.uuid4().hex[:16]
+                cloud_name = f"doctor_{timestamp}_{unique_id}"
 
-                os.makedirs(IMAGE_DOCTOR, exist_ok=True)
-                image_path = os.path.join(IMAGE_DOCTOR, file_name)
-                with open(image_path, "wb") as f:
-                    f.write(base64.b64decode(imgstr))
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=cloud_name,
+                    folder="doctors"
+                )
 
-                data["image"] = file_name  # cập nhật ảnh mới vào DB
+                image_url = upload_result.get("secure_url")
+                if image_url:
+                    data["image"] = image_url
+                else:
+                    return Response({
+                        "errCode": 13,
+                        "message": "Không lấy được URL ảnh từ Cloudinary"
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
             except Exception as e:
                 return Response({
                     "errCode": 12,
-                    "message": "Lỗi xử lý ảnh base64",
+                    "message": "Lỗi xử lý ảnh",
                     "error": str(e)
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-        # ✅ Cập nhật bác sĩ
+        # ✅ Cập nhật thông tin bác sĩ
         serializer = DoctorSerializer(doctor, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -669,55 +803,37 @@ def update_doctor(request):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    except jwt.ExpiredSignatureError:
-        return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-    except jwt.InvalidTokenError:
-        return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as e:
         return Response({
             "errCode": 99,
             "message": "Lỗi không xác định",
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-
+       
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def create_nurse(request):
     try:
-        # 📌 Lấy token từ header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
+        user = request.user
 
-        token = auth_header.split(" ")[1]
-
-        try:
-            decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            user_id = decoded.get('user_id')
-            if not user_id:
-                return Response({"errCode": 7, "message": "Token không chứa user_id"}, status=status.HTTP_401_UNAUTHORIZED)
-
-            User = get_user_model()
-            user = User.objects.get(id=user_id)
-
-            if user.role != 'admin':
-                return Response({"errCode": 4, "message": "Bạn không có quyền tạo bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
-
-        except jwt.ExpiredSignatureError:
-            return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-        except jwt.InvalidTokenError:
-            return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
-        except User.DoesNotExist:
-            return Response({"errCode": 8, "message": "Người dùng không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
+        if user.role != 'admin':
+            return Response({
+                "errCode": 4,
+                "message": "Bạn không có quyền tạo y tá"
+            }, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data.copy()
+        User = get_user_model()
 
         # 📌 Kiểm tra email đã tồn tại chưa
         if User.objects.filter(email=data.get("email")).exists():
-            return Response({"errCode": 9, "message": "Email đã được sử dụng"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "errCode": 9,
+                "message": "Email đã được sử dụng"
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Xử lý ảnh base64
+        # 📌 Xử lý ảnh base64 và upload lên Cloudinary
         image_base64 = data.get("image")
         if not image_base64 or image_base64.strip() == "":
             return Response({
@@ -728,34 +844,39 @@ def create_nurse(request):
         try:
             if "base64," in image_base64:
                 format_info, imgstr = image_base64.split(";base64,")
-                mime_type = format_info.split(":")[-1].lower()  # ví dụ: image/png
+                mime_type = format_info.split(":")[-1].lower()
                 ext = mimetypes.guess_extension(mime_type) or '.jpg'
-                ext = ext.lstrip('.')  # bỏ dấu chấm
+                ext = ext.lstrip('.')
             else:
                 imgstr = image_base64
-                ext = "jpg"  # fallback
+                ext = "jpg"
 
             if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
                 return Response({
                     "errCode": 11,
-                    "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                    "message": f"Định dạng ảnh không hỗ trợ: {ext}"
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             timestamp = int(time.time())
-            unique_id = uuid.uuid4().hex[:8]
-            file_name = f"{timestamp}-{unique_id}.{ext}"
+            unique_id = uuid.uuid4().hex[:16]
+            cloud_name = f"nurse_{timestamp}_{unique_id}"
 
-            os.makedirs(IMAGE_NURSE, exist_ok=True)
-            image_path = os.path.join(IMAGE_NURSE, file_name)
-            with open(image_path, "wb") as f:
-                f.write(base64.b64decode(imgstr))
+            upload_result = cloudinary.uploader.upload(
+                base64.b64decode(imgstr),
+                public_id=cloud_name,
+                folder="nurses"
+            )
 
-            data["image"] = file_name  # lưu tên file vào DB
+            image_url = upload_result.get("secure_url")
+            if not image_url:
+                raise Exception("Không lấy được URL từ Cloudinary")
+
+            data["image"] = image_url
 
         except Exception as e:
             return Response({
                 "errCode": 12,
-                "message": "Lỗi xử lý ảnh base64",
+                "message": "Lỗi xử lý ảnh hoặc upload ảnh lên Cloud",
                 "error": str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
 
@@ -767,13 +888,13 @@ def create_nurse(request):
         )
         data["user"] = new_user.id
 
-        # 📌 Tạo bác sĩ
+        # 📌 Tạo nurse record
         serializer = NurseSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
             return Response({
                 "errCode": 0,
-                "message": "Tạo bác sĩ thành công",
+                "message": "Tạo y tá thành công",
                 "data": serializer.data
             }, status=status.HTTP_201_CREATED)
 
@@ -791,14 +912,63 @@ def create_nurse(request):
             "message": "Lỗi hệ thống",
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_nurse_by_token(request):
+    try:
+        user = request.user  # Lấy từ token
+
+        # Cố gắng truy ra y tá
+        try:
+            nurse = Nurse.objects.get(user_id=user.id)
+            data = model_to_dict(nurse)
+        except Nurse.DoesNotExist:
+            data = {}  # Không có y tá, trả về rỗng
+
+        return Response({
+            "errCode": 0,
+            "message": "Lấy thông tin y tá thành công",
+            "data": data
+        }, status=200)
 
     except Exception as e:
-        logger.error(f"Lỗi tạo y tá: {e}")
         return Response({
             "errCode": 2,
             "message": "Lỗi hệ thống",
-            "error": str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            "error": str(e),
+            "data": {}
+        }, status=500)
+
+
+        
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_pharmacist_by_token(request):
+    try:
+        user = request.user  # Lấy từ token
+
+        # Cố gắng truy ra y tá
+        try:
+            pharmacist = Pharmacist.objects.get(user_id=user.id)
+            data = model_to_dict(pharmacist)
+        except pharmacist.DoesNotExist:
+            data = {}  # Không có y tá, trả về rỗng
+
+        return Response({
+            "errCode": 0,
+            "message": "Lấy thông tin y tá thành công",
+            "data": data
+        }, status=200)
+
+    except Exception as e:
+        return Response({
+            "errCode": 2,
+            "message": "Lỗi hệ thống",
+            "error": str(e),
+            "data": {}
+        }, status=500)
 
 
 @api_view(['GET'])
@@ -837,7 +1007,6 @@ def get_all_nurse_with_user_status(request):
         }, status=500)
         
         
-      
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_nurse(request):
@@ -850,22 +1019,7 @@ def get_nurse(request):
             }, status=400)
 
         nurse = Nurse.objects.get(id=nurse_id)
-
-        data = model_to_dict(nurse)
-
-        # Đọc ảnh và chuyển sang base64 định dạng chuẩn
-        data['image_name']=nurse.image
-        image_base64 = ""
-        if nurse.image:
-            image_path = os.path.join(IMAGE_NURSE, nurse.image)
-            if os.path.exists(image_path):
-                mime_type, _ = mimetypes.guess_type(image_path)
-                if mime_type:
-                    with open(image_path, 'rb') as img_file:
-                        encoded = base64.b64encode(img_file.read()).decode('utf-8')
-                        image_base64 = f"data:{mime_type};base64,{encoded}"
-
-        data['image'] = image_base64
+        data = model_to_dict(nurse)  # image đã nằm trong data nếu dùng ImageField
 
         return Response({
             "errCode": 0,
@@ -889,43 +1043,115 @@ def get_nurse(request):
             "error": str(e),
             "data": {}
         }, status=500)
-        
+
        
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_nurse_by_user(request):
+    try:
+        nurse_id = request.GET.get('id')
+        if not nurse_id:
+            return Response({
+                "errCode": 3,
+                "message": "Thiếu ID y tá"
+            }, status=400)
+
+        nurse = Nurse.objects.get(user_id=nurse_id)
+        data = model_to_dict(nurse)  # image đã nằm trong data nếu dùng ImageField
+
+        return Response({
+            "errCode": 0,
+            "message": "Lấy y tá thành công",
+            "method": request.method,
+            "data": {
+                "name":data.get("name")
+            }
+        }, status=200)
+
+    except Nurse.DoesNotExist:
+        return Response({
+            "errCode": 1,
+            "message": "Không tìm thấy y tá",
+            "data": {}
+        }, status=404)
+
+    except Exception as e:
+        return Response({
+            "errCode": 2,
+            "message": "Lỗi hệ thống",
+            "method": request.method,
+            "error": str(e),
+            "data": {}
+        }, status=500)
+
+     
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_doctor_by_user(request):
+    try:
+        doctor_id = request.GET.get('id')
+        if not doctor_id:
+            return Response({
+                "errCode": 3,
+                "message": "Thiếu ID y tá"
+            }, status=400)
+
+        doctor = Doctor.objects.get(user_id=doctor_id)
+        data = model_to_dict(doctor)  # image đã nằm trong data nếu dùng ImageField
+
+        return Response({
+            "errCode": 0,
+            "message": "Lấy y tá thành công",
+            "method": request.method,
+            "data": {
+                "name":data.get("name")
+            }
+        }, status=200)
+
+    except Nurse.DoesNotExist:
+        return Response({
+            "errCode": 1,
+            "message": "Không tìm thấy bác sĩ",
+            "data": {}
+        }, status=404)
+
+    except Exception as e:
+        return Response({
+            "errCode": 2,
+            "message": "Lỗi hệ thống",
+            "method": request.method,
+            "error": str(e),
+            "data": {}
+        }, status=500)
+        
 @api_view(['PUT'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def update_nurse(request):
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
-
-        token = auth_header.split(" ")[1]
-        decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-        user_id = decoded.get('user_id')
-
-        User = get_user_model()
-        user = User.objects.get(id=user_id)
-
+        user = request.user
         if user.role != 'admin':
-            return Response({"errCode": 4, "message": "Bạn không có quyền cập nhật bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({
+                "errCode": 4,
+                "message": "Bạn không có quyền cập nhật y tá"
+            }, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data.copy()
         nurse_id = data.get("id")
         if not nurse_id:
-            return Response({"errCode": 5, "message": "Thiếu id bác sĩ"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "errCode": 5,
+                "message": "Thiếu id y tá"
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         nurse = Nurse.objects.filter(id=nurse_id).first()
         if not nurse:
-            return Response({"errCode": 6, "message": "Không tìm thấy bác sĩ"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "errCode": 6,
+                "message": "Không tìm thấy y tá"
+            }, status=status.HTTP_404_NOT_FOUND)
 
-        # ✅ Xoá ảnh cũ
-        old_image_name = data.get("image_name")
-        if old_image_name:
-            old_path = os.path.join(IMAGE_NURSE, old_image_name)
-            if os.path.exists(old_path):
-                os.remove(old_path)
-
-        # ✅ Xử lý ảnh mới
+        # ✅ Nếu có ảnh mới thì xử lý upload
         image_base64 = data.get("image")
         if image_base64 and image_base64.strip() != "":
             try:
@@ -941,27 +1167,33 @@ def update_nurse(request):
                 if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
                     return Response({
                         "errCode": 11,
-                        "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                        "message": f"Định dạng ảnh không hỗ trợ: {ext}"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 timestamp = int(time.time())
-                unique_id = uuid.uuid4().hex[:8]
-                file_name = f"{timestamp}-{unique_id}.{ext}"
+                unique_id = uuid.uuid4().hex[:16]
+                cloud_name = f"nurse_update_{timestamp}_{unique_id}"
 
-                os.makedirs(IMAGE_NURSE, exist_ok=True)
-                image_path = os.path.join(IMAGE_NURSE, file_name)
-                with open(image_path, "wb") as f:
-                    f.write(base64.b64decode(imgstr))
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=cloud_name,
+                    folder="nurses"
+                )
 
-                data["image"] = file_name  # cập nhật ảnh mới vào DB
+                image_url = upload_result.get("secure_url")
+                if not image_url:
+                    raise Exception("Không lấy được URL ảnh từ Cloudinary")
+
+                data["image"] = image_url
+
             except Exception as e:
                 return Response({
                     "errCode": 12,
-                    "message": "Lỗi xử lý ảnh base64",
+                    "message": "Lỗi xử lý ảnh hoặc upload ảnh",
                     "error": str(e)
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-        # ✅ Cập nhật bác sĩ
+        # ✅ Cập nhật thông tin y tá
         serializer = NurseSerializer(nurse, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -977,56 +1209,528 @@ def update_nurse(request):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    except jwt.ExpiredSignatureError:
-        return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-    except jwt.InvalidTokenError:
-        return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as e:
         return Response({
             "errCode": 99,
             "message": "Lỗi không xác định",
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-      
-
-@api_view(['POST'])
+ 
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
-def create_technician(request):
+def update_nurse_token(request):
     try:
-        # 📌 Lấy token từ header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
-
-        token = auth_header.split(" ")[1]
-
-        try:
-            decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            user_id = decoded.get('user_id')
-            if not user_id:
-                return Response({"errCode": 7, "message": "Token không chứa user_id"}, status=status.HTTP_401_UNAUTHORIZED)
-
-            User = get_user_model()
-            user = User.objects.get(id=user_id)
-
-            if user.role != 'admin':
-                return Response({"errCode": 4, "message": "Bạn không có quyền tạo bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
-
-        except jwt.ExpiredSignatureError:
-            return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-        except jwt.InvalidTokenError:
-            return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
-        except User.DoesNotExist:
-            return Response({"errCode": 8, "message": "Người dùng không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
+        user = request.user
+        nurse = Nurse.objects.filter(user_id=user.id).first()
+        if not nurse:
+            return Response({
+                "errCode": 6,
+                "message": "Không tìm thấy y tá tương ứng với tài khoản"
+            }, status=status.HTTP_404_NOT_FOUND)
 
         data = request.data.copy()
 
+        image_base64 = data.get("image")
+        
+        if image_base64 and image_base64.strip() != "":
+            # Có ảnh mới => xử lý xóa ảnh cũ + upload ảnh mới
+            try:
+                # Xoá ảnh cũ nếu có
+                if nurse.image:
+                    parsed_url = urlparse(nurse.image)
+                    path_parts = parsed_url.path.split('/')  # ['', 'image', 'upload', 'v12345', 'nurses', 'filename.jpg']
+                    if 'upload' in path_parts:
+                        index = path_parts.index('upload')
+                        public_id_parts = path_parts[index + 2:]  # ['nurses', 'filename.jpg']
+                        public_id_with_ext = "/".join(public_id_parts)       # nurses/filename.jpg
+                        public_id = os.path.splitext(public_id_with_ext)[0]  # nurses/filename
+                        cloudinary.uploader.destroy(public_id)
+
+                # Xử lý upload ảnh mới
+                if "base64," in image_base64:
+                    format_info, imgstr = image_base64.split(";base64,")
+                    mime_type = format_info.split(":")[-1].lower()
+                    ext = mimetypes.guess_extension(mime_type) or '.jpg'
+                    ext = ext.lstrip('.')
+                else:
+                    imgstr = image_base64
+                    ext = "jpg"
+
+                if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+                    return Response({
+                        "errCode": 11,
+                        "message": f"Định dạng ảnh không hỗ trợ: {ext}"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                timestamp = int(time.time())
+                unique_id = uuid.uuid4().hex[:16]
+                cloud_name = f"nurse_{timestamp}_{unique_id}"
+
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=cloud_name,
+                    folder="nurses"
+                )
+
+                image_url = upload_result.get("secure_url")
+                if not image_url:
+                    raise Exception("Không lấy được URL ảnh từ Cloudinary")
+
+                data["image"] = image_url
+
+            except Exception as e:
+                return Response({
+                    "errCode": 12,
+                    "message": "Lỗi xử lý ảnh hoặc upload ảnh",
+                    "error": str(e)
+                }, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Nếu không có ảnh mới thì không truyền key "image" vào data để tránh ghi đè ảnh cũ thành rỗng
+            if "image" in data:
+                data.pop("image")
+
+        # Cập nhật thông tin y tá (cả các trường khác)
+        serializer = NurseSerializer(nurse, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "errCode": 0,
+                "message": "Cập nhật y tá thành công",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "errCode": 2,
+            "message": "Lỗi dữ liệu đầu vào",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        return Response({
+            "errCode": 99,
+            "message": "Lỗi không xác định",
+            "error": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+ 
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def update_pharmacist_token(request):
+    try:
+        user = request.user
+        pharmacist = Pharmacist.objects.filter(user_id=user.id).first()
+        if not pharmacist:
+            return Response({
+                "errCode": 6,
+                "message": "Không tìm thấy y tá tương ứng với tài khoản"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        data = request.data.copy()
+
+        image_base64 = data.get("image")
+        
+        if image_base64 and image_base64.strip() != "":
+            # Có ảnh mới => xử lý xóa ảnh cũ + upload ảnh mới
+            try:
+                # Xoá ảnh cũ nếu có
+                if pharmacist.image:
+                    parsed_url = urlparse(pharmacist.image)
+                    path_parts = parsed_url.path.split('/')  # ['', 'image', 'upload', 'v12345', 'nurses', 'filename.jpg']
+                    if 'upload' in path_parts:
+                        index = path_parts.index('upload')
+                        public_id_parts = path_parts[index + 2:]  # ['nurses', 'filename.jpg']
+                        public_id_with_ext = "/".join(public_id_parts)       # nurses/filename.jpg
+                        public_id = os.path.splitext(public_id_with_ext)[0]  # nurses/filename
+                        cloudinary.uploader.destroy(public_id)
+
+                # Xử lý upload ảnh mới
+                if "base64," in image_base64:
+                    format_info, imgstr = image_base64.split(";base64,")
+                    mime_type = format_info.split(":")[-1].lower()
+                    ext = mimetypes.guess_extension(mime_type) or '.jpg'
+                    ext = ext.lstrip('.')
+                else:
+                    imgstr = image_base64
+                    ext = "jpg"
+
+                if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+                    return Response({
+                        "errCode": 11,
+                        "message": f"Định dạng ảnh không hỗ trợ: {ext}"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                timestamp = int(time.time())
+                unique_id = uuid.uuid4().hex[:16]
+                cloud_name = f"pharmacist_{timestamp}_{unique_id}"
+
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=cloud_name,
+                    folder="pharmacists"
+                )
+
+                image_url = upload_result.get("secure_url")
+                if not image_url:
+                    raise Exception("Không lấy được URL ảnh từ Cloudinary")
+
+                data["image"] = image_url
+
+            except Exception as e:
+                return Response({
+                    "errCode": 12,
+                    "message": "Lỗi xử lý ảnh hoặc upload ảnh",
+                    "error": str(e)
+                }, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Nếu không có ảnh mới thì không truyền key "image" vào data để tránh ghi đè ảnh cũ thành rỗng
+            if "image" in data:
+                data.pop("image")
+
+        # Cập nhật thông tin pharmacist (cả các trường khác)
+        serializer = PharmacistSerializer(pharmacist, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "errCode": 0,
+                "message": "Cập nhật ktv thành công",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "errCode": 2,
+            "message": "Lỗi dữ liệu đầu vào",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        return Response({
+            "errCode": 99,
+            "message": "Lỗi không xác định",
+            "error": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)    
+
+
+ 
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def update_cashier_token(request):
+    try:
+        user = request.user
+        cashier = Cashier.objects.filter(user_id=user.id).first()
+        if not cashier:
+            return Response({
+                "errCode": 6,
+                "message": "Không tìm thấy y tá tương ứng với tài khoản"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        data = request.data.copy()
+
+        image_base64 = data.get("image")
+        
+        if image_base64 and image_base64.strip() != "":
+            # Có ảnh mới => xử lý xóa ảnh cũ + upload ảnh mới
+            try:
+                # Xoá ảnh cũ nếu có
+                if cashier.image:
+                    parsed_url = urlparse(cashier.image)
+                    path_parts = parsed_url.path.split('/')  # ['', 'image', 'upload', 'v12345', 'nurses', 'filename.jpg']
+                    if 'upload' in path_parts:
+                        index = path_parts.index('upload')
+                        public_id_parts = path_parts[index + 2:]  # ['nurses', 'filename.jpg']
+                        public_id_with_ext = "/".join(public_id_parts)       # nurses/filename.jpg
+                        public_id = os.path.splitext(public_id_with_ext)[0]  # nurses/filename
+                        cloudinary.uploader.destroy(public_id)
+
+                # Xử lý upload ảnh mới
+                if "base64," in image_base64:
+                    format_info, imgstr = image_base64.split(";base64,")
+                    mime_type = format_info.split(":")[-1].lower()
+                    ext = mimetypes.guess_extension(mime_type) or '.jpg'
+                    ext = ext.lstrip('.')
+                else:
+                    imgstr = image_base64
+                    ext = "jpg"
+
+                if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+                    return Response({
+                        "errCode": 11,
+                        "message": f"Định dạng ảnh không hỗ trợ: {ext}"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                timestamp = int(time.time())
+                unique_id = uuid.uuid4().hex[:16]
+                cloud_name = f"cashier_{timestamp}_{unique_id}"
+
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=cloud_name,
+                    folder="cashiers"
+                )
+
+                image_url = upload_result.get("secure_url")
+                if not image_url:
+                    raise Exception("Không lấy được URL ảnh từ Cloudinary")
+
+                data["image"] = image_url
+
+            except Exception as e:
+                return Response({
+                    "errCode": 12,
+                    "message": "Lỗi xử lý ảnh hoặc upload ảnh",
+                    "error": str(e)
+                }, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Nếu không có ảnh mới thì không truyền key "image" vào data để tránh ghi đè ảnh cũ thành rỗng
+            if "image" in data:
+                data.pop("image")
+
+        # Cập nhật thông tin pharmacist (cả các trường khác)
+        serializer = CashierSerializer(cashier, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "errCode": 0,
+                "message": "Cập nhật ktv thành công",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "errCode": 2,
+            "message": "Lỗi dữ liệu đầu vào",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        return Response({
+            "errCode": 99,
+            "message": "Lỗi không xác định",
+            "error": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)    
+        
+
+ 
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def update_doctor_token(request):
+    try:
+        user = request.user
+        doctor = Doctor.objects.filter(user_id=user.id).first()
+        if not doctor:
+            return Response({
+                "errCode": 6,
+                "message": "Không tìm thấy y tá tương ứng với tài khoản"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        data = request.data.copy()
+
+        image_base64 = data.get("image")
+        
+        if image_base64 and image_base64.strip() != "":
+            # Có ảnh mới => xử lý xóa ảnh cũ + upload ảnh mới
+            try:
+                # Xoá ảnh cũ nếu có
+                if doctor.image:
+                    parsed_url = urlparse(doctor.image)
+                    path_parts = parsed_url.path.split('/')  # ['', 'image', 'upload', 'v12345', 'nurses', 'filename.jpg']
+                    if 'upload' in path_parts:
+                        index = path_parts.index('upload')
+                        public_id_parts = path_parts[index + 2:]  # ['nurses', 'filename.jpg']
+                        public_id_with_ext = "/".join(public_id_parts)       # nurses/filename.jpg
+                        public_id = os.path.splitext(public_id_with_ext)[0]  # nurses/filename
+                        cloudinary.uploader.destroy(public_id)
+
+                # Xử lý upload ảnh mới
+                if "base64," in image_base64:
+                    format_info, imgstr = image_base64.split(";base64,")
+                    mime_type = format_info.split(":")[-1].lower()
+                    ext = mimetypes.guess_extension(mime_type) or '.jpg'
+                    ext = ext.lstrip('.')
+                else:
+                    imgstr = image_base64
+                    ext = "jpg"
+
+                if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+                    return Response({
+                        "errCode": 11,
+                        "message": f"Định dạng ảnh không hỗ trợ: {ext}"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                timestamp = int(time.time())
+                unique_id = uuid.uuid4().hex[:16]
+                cloud_name = f"doctor_{timestamp}_{unique_id}"
+
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=cloud_name,
+                    folder="doctors"
+                )
+
+                image_url = upload_result.get("secure_url")
+                if not image_url:
+                    raise Exception("Không lấy được URL ảnh từ Cloudinary")
+
+                data["image"] = image_url
+
+            except Exception as e:
+                return Response({
+                    "errCode": 12,
+                    "message": "Lỗi xử lý ảnh hoặc upload ảnh",
+                    "error": str(e)
+                }, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Nếu không có ảnh mới thì không truyền key "image" vào data để tránh ghi đè ảnh cũ thành rỗng
+            if "image" in data:
+                data.pop("image")
+
+        # Cập nhật thông tin pharmacist (cả các trường khác)
+        serializer = DoctorSerializer(doctor, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "errCode": 0,
+                "message": "Cập nhật ktv thành công",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "errCode": 2,
+            "message": "Lỗi dữ liệu đầu vào",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        return Response({
+            "errCode": 99,
+            "message": "Lỗi không xác định",
+            "error": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)    
+
+      
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def update_technician_token(request):
+    try:
+        user = request.user
+        technician = Technician.objects.filter(user_id=user.id).first()
+        if not technician:
+            return Response({
+                "errCode": 6,
+                "message": "Không tìm thấy y tá tương ứng với tài khoản"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        data = request.data.copy()
+
+        image_base64 = data.get("image")
+        
+        if image_base64 and image_base64.strip() != "":
+            # Có ảnh mới => xử lý xóa ảnh cũ + upload ảnh mới
+            try:
+                # Xoá ảnh cũ nếu có
+                if technician.image:
+                    parsed_url = urlparse(technician.image)
+                    path_parts = parsed_url.path.split('/')  # ['', 'image', 'upload', 'v12345', 'nurses', 'filename.jpg']
+                    if 'upload' in path_parts:
+                        index = path_parts.index('upload')
+                        public_id_parts = path_parts[index + 2:]  # ['nurses', 'filename.jpg']
+                        public_id_with_ext = "/".join(public_id_parts)       # nurses/filename.jpg
+                        public_id = os.path.splitext(public_id_with_ext)[0]  # nurses/filename
+                        cloudinary.uploader.destroy(public_id)
+
+                # Xử lý upload ảnh mới
+                if "base64," in image_base64:
+                    format_info, imgstr = image_base64.split(";base64,")
+                    mime_type = format_info.split(":")[-1].lower()
+                    ext = mimetypes.guess_extension(mime_type) or '.jpg'
+                    ext = ext.lstrip('.')
+                else:
+                    imgstr = image_base64
+                    ext = "jpg"
+
+                if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+                    return Response({
+                        "errCode": 11,
+                        "message": f"Định dạng ảnh không hỗ trợ: {ext}"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                timestamp = int(time.time())
+                unique_id = uuid.uuid4().hex[:16]
+                cloud_name = f"technician_{timestamp}_{unique_id}"
+
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=cloud_name,
+                    folder="technicians"
+                )
+
+                image_url = upload_result.get("secure_url")
+                if not image_url:
+                    raise Exception("Không lấy được URL ảnh từ Cloudinary")
+
+                data["image"] = image_url
+
+            except Exception as e:
+                return Response({
+                    "errCode": 12,
+                    "message": "Lỗi xử lý ảnh hoặc upload ảnh",
+                    "error": str(e)
+                }, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Nếu không có ảnh mới thì không truyền key "image" vào data để tránh ghi đè ảnh cũ thành rỗng
+            if "image" in data:
+                data.pop("image")
+
+        # Cập nhật thông tin pharmacist (cả các trường khác)
+        serializer = TechnicianSerializer(technician, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "errCode": 0,
+                "message": "Cập nhật ktv thành công",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "errCode": 2,
+            "message": "Lỗi dữ liệu đầu vào",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    except Exception as e:
+        return Response({
+            "errCode": 99,
+            "message": "Lỗi không xác định",
+            "error": str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)       
+        
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def create_technician(request):
+    try:
+        user = request.user
+        if user.role != 'admin':
+            return Response({
+                "errCode": 4,
+                "message": "Bạn không có quyền tạo kỹ thuật viên"
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data.copy()
+        User = get_user_model()
+
         # 📌 Kiểm tra email đã tồn tại chưa
         if User.objects.filter(email=data.get("email")).exists():
-            return Response({"errCode": 9, "message": "Email đã được sử dụng"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "errCode": 9,
+                "message": "Email đã được sử dụng"
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Xử lý ảnh base64
+        # ✅ Xử lý ảnh base64 upload lên Cloudinary
         image_base64 = data.get("image")
         if not image_base64 or image_base64.strip() == "":
             return Response({
@@ -1037,29 +1741,37 @@ def create_technician(request):
         try:
             if "base64," in image_base64:
                 format_info, imgstr = image_base64.split(";base64,")
-                mime_type = format_info.split(":")[-1].lower()  # ví dụ: image/png
+                mime_type = format_info.split(":")[-1].lower()
                 ext = mimetypes.guess_extension(mime_type) or '.jpg'
-                ext = ext.lstrip('.')  # bỏ dấu chấm
+                ext = ext.lstrip('.')
             else:
                 imgstr = image_base64
-                ext = "jpg"  # fallback
+                ext = "jpg"
 
             if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
                 return Response({
                     "errCode": 11,
-                    "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                    "message": f"Định dạng ảnh không hỗ trợ: {ext}"
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             timestamp = int(time.time())
-            unique_id = uuid.uuid4().hex[:8]
-            file_name = f"{timestamp}-{unique_id}.{ext}"
+            unique_id = uuid.uuid4().hex[:16]
+            cloud_name = f"technician_{timestamp}_{unique_id}"
 
-            os.makedirs(IMAGE_TECH, exist_ok=True)
-            image_path = os.path.join(IMAGE_TECH, file_name)
-            with open(image_path, "wb") as f:
-                f.write(base64.b64decode(imgstr))
+            upload_result = cloudinary.uploader.upload(
+                base64.b64decode(imgstr),
+                public_id=cloud_name,
+                folder="technicians"
+            )
 
-            data["image"] = file_name  # lưu tên file vào DB
+            image_url = upload_result.get("secure_url")
+            if image_url:
+                data["image"] = image_url
+            else:
+                return Response({
+                    "errCode": 13,
+                    "message": "Không lấy được URL ảnh từ Cloudinary"
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         except Exception as e:
             return Response({
@@ -1068,7 +1780,7 @@ def create_technician(request):
                 "error": str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Tạo user mới cho y tá
+        # ✅ Tạo user mới cho kỹ thuật viên
         new_user = User.objects.create_user(
             email=data.get("email"),
             password=data.get("password"),
@@ -1076,13 +1788,13 @@ def create_technician(request):
         )
         data["user"] = new_user.id
 
-        # 📌 Tạo bác sĩ
+        # ✅ Tạo bản ghi kỹ thuật viên
         serializer = TechnicianSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
             return Response({
                 "errCode": 0,
-                "message": "Tạo Kĩ thuật viên thành công",
+                "message": "Tạo kỹ thuật viên thành công",
                 "data": serializer.data
             }, status=status.HTTP_201_CREATED)
 
@@ -1100,16 +1812,6 @@ def create_technician(request):
             "message": "Lỗi hệ thống",
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    except Exception as e:
-        logger.error(f"Lỗi tạo kĩ thuật viên: {e}")
-        return Response({
-            "errCode": 2,
-            "message": "Lỗi hệ thống",
-            "error": str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_all_technician_with_user_status(request):
@@ -1161,21 +1863,6 @@ def get_technician(request):
         technician = Technician.objects.get(id=technician_id)
 
         data = model_to_dict(technician)
-
-        # Đọc ảnh và chuyển sang base64 định dạng chuẩn
-        data['image_name']=technician.image
-        image_base64 = ""
-        if technician.image:
-            image_path = os.path.join(IMAGE_TECH, technician.image)
-            if os.path.exists(image_path):
-                mime_type, _ = mimetypes.guess_type(image_path)
-                if mime_type:
-                    with open(image_path, 'rb') as img_file:
-                        encoded = base64.b64encode(img_file.read()).decode('utf-8')
-                        image_base64 = f"data:{mime_type};base64,{encoded}"
-
-        data['image'] = image_base64
-
         return Response({
             "errCode": 0,
             "message": "Lấy y tá thành công",
@@ -1198,46 +1885,48 @@ def get_technician(request):
             "error": str(e),
             "data": {}
         }, status=500)
-        
-       
+
+
 @api_view(['PUT'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def update_technician(request):
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
-
-        token = auth_header.split(" ")[1]
-        decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-        user_id = decoded.get('user_id')
-
-        User = get_user_model()
-        user = User.objects.get(id=user_id)
-
+        # Kiểm tra quyền của người dùng
+        user = request.user
         if user.role != 'admin':
-            return Response({"errCode": 4, "message": "Bạn không có quyền cập nhật bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({
+                "errCode": 4,
+                "message": "Bạn không có quyền cập nhật kỹ thuật viên"
+            }, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data.copy()
         technician_id = data.get("id")
         if not technician_id:
-            return Response({"errCode": 5, "message": "Thiếu id bác sĩ"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "errCode": 5,
+                "message": "Thiếu id kỹ thuật viên"
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         technician = Technician.objects.filter(id=technician_id).first()
         if not technician:
-            return Response({"errCode": 6, "message": "Không tìm thấy bác sĩ"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "errCode": 6,
+                "message": "Không tìm thấy kỹ thuật viên"
+            }, status=status.HTTP_404_NOT_FOUND)
 
-        # ✅ Xoá ảnh cũ
-        old_image_name = data.get("image_name")
-        if old_image_name:
-            old_path = os.path.join(IMAGE_TECH, old_image_name)
-            if os.path.exists(old_path):
-                os.remove(old_path)
-
-        # ✅ Xử lý ảnh mới
+        # ✅ Xử lý ảnh base64 và upload lên Cloudinary
         image_base64 = data.get("image")
         if image_base64 and image_base64.strip() != "":
             try:
+                # ❌ Xoá ảnh cũ nếu có
+                old_image_url = technician.image
+                match = re.search(r'/upload/(?:v\d+/)?(?P<public_id>.+?)\.(?:jpg|jpeg|png|gif|webp)', old_image_url or "")
+                if match:
+                    public_id = match.group('public_id')  # ví dụ: 'technicians/technician_...'
+                    cloudinary.uploader.destroy(public_id)
+
+                # ✅ Tách định dạng ảnh và decode base64
                 if "base64," in image_base64:
                     format_info, imgstr = image_base64.split(";base64,")
                     mime_type = format_info.split(":")[-1].lower()
@@ -1253,30 +1942,38 @@ def update_technician(request):
                         "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
+                # Tạo tên ảnh duy nhất để upload lên Cloudinary
                 timestamp = int(time.time())
                 unique_id = uuid.uuid4().hex[:8]
-                file_name = f"{timestamp}-{unique_id}.{ext}"
+                cloud_name = f"technician_{timestamp}_{unique_id}"
 
-                os.makedirs(IMAGE_TECH, exist_ok=True)
-                image_path = os.path.join(IMAGE_TECH, file_name)
-                with open(image_path, "wb") as f:
-                    f.write(base64.b64decode(imgstr))
+                # Upload ảnh lên Cloudinary
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=cloud_name,
+                    folder="technicians"
+                )
 
-                data["image"] = file_name  # cập nhật ảnh mới vào DB
+                image_url = upload_result.get("secure_url")
+                if not image_url:
+                    raise Exception("Không lấy được URL ảnh từ Cloudinary")
+
+                data["image"] = image_url  # Cập nhật ảnh mới vào DB
+
             except Exception as e:
                 return Response({
                     "errCode": 12,
-                    "message": "Lỗi xử lý ảnh base64",
+                    "message": "Lỗi xử lý ảnh base64 hoặc upload ảnh",
                     "error": str(e)
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-        # ✅ Cập nhật bác sĩ
+        # ✅ Cập nhật thông tin kỹ thuật viên
         serializer = TechnicianSerializer(technician, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
             return Response({
                 "errCode": 0,
-                "message": "Cập nhật y tá thành công",
+                "message": "Cập nhật kỹ thuật viên thành công",
                 "data": serializer.data
             }, status=status.HTTP_200_OK)
 
@@ -1286,10 +1983,6 @@ def update_technician(request):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    except jwt.ExpiredSignatureError:
-        return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-    except jwt.InvalidTokenError:
-        return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as e:
         return Response({
             "errCode": 99,
@@ -1297,45 +1990,26 @@ def update_technician(request):
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
-        
-
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def create_pharmacist(request):
     try:
-        # 📌 Lấy token từ header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
-
-        token = auth_header.split(" ")[1]
-
-        try:
-            decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            user_id = decoded.get('user_id')
-            if not user_id:
-                return Response({"errCode": 7, "message": "Token không chứa user_id"}, status=status.HTTP_401_UNAUTHORIZED)
-
-            User = get_user_model()
-            user = User.objects.get(id=user_id)
-
-            if user.role != 'admin':
-                return Response({"errCode": 4, "message": "Bạn không có quyền tạo bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
-
-        except jwt.ExpiredSignatureError:
-            return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-        except jwt.InvalidTokenError:
-            return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
-        except User.DoesNotExist:
-            return Response({"errCode": 8, "message": "Người dùng không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
+        # Kiểm tra quyền của người dùng
+        user = request.user
+        if user.role != 'admin':
+            return Response({
+                "errCode": 4,
+                "message": "Bạn không có quyền tạo kĩ thuật viên"
+            }, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data.copy()
 
-        # 📌 Kiểm tra email đã tồn tại chưa
+        # Kiểm tra email đã tồn tại chưa
         if User.objects.filter(email=data.get("email")).exists():
             return Response({"errCode": 9, "message": "Email đã được sử dụng"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Xử lý ảnh base64
+        # Xử lý ảnh base64 và upload lên Cloudinary
         image_base64 = data.get("image")
         if not image_base64 or image_base64.strip() == "":
             return Response({
@@ -1344,11 +2018,12 @@ def create_pharmacist(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            # Kiểm tra và lấy thông tin định dạng của ảnh
             if "base64," in image_base64:
                 format_info, imgstr = image_base64.split(";base64,")
-                mime_type = format_info.split(":")[-1].lower()  # ví dụ: image/png
+                mime_type = format_info.split(":")[-1].lower()
                 ext = mimetypes.guess_extension(mime_type) or '.jpg'
-                ext = ext.lstrip('.')  # bỏ dấu chấm
+                ext = ext.lstrip('.')
             else:
                 imgstr = image_base64
                 ext = "jpg"  # fallback
@@ -1359,25 +2034,32 @@ def create_pharmacist(request):
                     "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
                 }, status=status.HTTP_400_BAD_REQUEST)
 
+            # Tạo tên ảnh duy nhất để upload lên Cloudinary
             timestamp = int(time.time())
             unique_id = uuid.uuid4().hex[:8]
-            file_name = f"{timestamp}-{unique_id}.{ext}"
+            cloud_name = f"pharmacist_{timestamp}_{unique_id}"
 
-            os.makedirs(IMAGE_PHARMA, exist_ok=True)
-            image_path = os.path.join(IMAGE_PHARMA, file_name)
-            with open(image_path, "wb") as f:
-                f.write(base64.b64decode(imgstr))
+            # Upload ảnh lên Cloudinary
+            upload_result = cloudinary.uploader.upload(
+                base64.b64decode(imgstr),
+                public_id=cloud_name,
+                folder="pharmacists"
+            )
 
-            data["image"] = file_name  # lưu tên file vào DB
+            image_url = upload_result.get("secure_url")
+            if not image_url:
+                raise Exception("Không lấy được URL ảnh từ Cloudinary")
+
+            data["image"] = image_url  # Cập nhật URL ảnh mới vào DB
 
         except Exception as e:
             return Response({
                 "errCode": 12,
-                "message": "Lỗi xử lý ảnh base64",
+                "message": "Lỗi xử lý ảnh base64 hoặc upload ảnh",
                 "error": str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Tạo user mới cho y tá
+        # Tạo user mới cho kĩ thuật viên
         new_user = User.objects.create_user(
             email=data.get("email"),
             password=data.get("password"),
@@ -1385,7 +2067,7 @@ def create_pharmacist(request):
         )
         data["user"] = new_user.id
 
-        # 📌 Tạo bác sĩ
+        # Tạo kĩ thuật viên
         serializer = PharmacistSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
@@ -1395,20 +2077,13 @@ def create_pharmacist(request):
                 "data": serializer.data
             }, status=status.HTTP_201_CREATED)
 
-        # ⚠️ Nếu lỗi thì rollback user đã tạo
+        # Nếu lỗi thì rollback user đã tạo
         new_user.delete()
         return Response({
             "errCode": 1,
             "message": "Lỗi dữ liệu đầu vào",
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
-
-    except Exception as e:
-        return Response({
-            "errCode": 2,
-            "message": "Lỗi hệ thống",
-            "error": str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     except Exception as e:
         logger.error(f"Lỗi tạo kĩ thuật viên: {e}")
@@ -1470,21 +2145,6 @@ def get_pharmacist(request):
         pharmacist = Pharmacist.objects.get(id=pharmacist_id)
 
         data = model_to_dict(pharmacist)
-
-        # Đọc ảnh và chuyển sang base64 định dạng chuẩn
-        data['image_name']=pharmacist.image
-        image_base64 = ""
-        if pharmacist.image:
-            image_path = os.path.join(IMAGE_PHARMA, pharmacist.image)
-            if os.path.exists(image_path):
-                mime_type, _ = mimetypes.guess_type(image_path)
-                if mime_type:
-                    with open(image_path, 'rb') as img_file:
-                        encoded = base64.b64encode(img_file.read()).decode('utf-8')
-                        image_base64 = f"data:{mime_type};base64,{encoded}"
-
-        data['image'] = image_base64
-
         return Response({
             "errCode": 0,
             "message": "Lấy y tá thành công",
@@ -1507,46 +2167,47 @@ def get_pharmacist(request):
             "error": str(e),
             "data": {}
         }, status=500)
-        
-       
+
+
 @api_view(['PUT'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def update_pharmacist(request):
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
-
-        token = auth_header.split(" ")[1]
-        decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-        user_id = decoded.get('user_id')
-
-        User = get_user_model()
-        user = User.objects.get(id=user_id)
-
+        user = request.user
         if user.role != 'admin':
-            return Response({"errCode": 4, "message": "Bạn không có quyền cập nhật bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({
+                "errCode": 4,
+                "message": "Bạn không có quyền cập nhật y tá"
+            }, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data.copy()
         pharmacist_id = data.get("id")
+
         if not pharmacist_id:
-            return Response({"errCode": 5, "message": "Thiếu id bác sĩ"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "errCode": 5,
+                "message": "Thiếu ID y tá"
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         pharmacist = Pharmacist.objects.filter(id=pharmacist_id).first()
         if not pharmacist:
-            return Response({"errCode": 6, "message": "Không tìm thấy bác sĩ"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "errCode": 6,
+                "message": "Không tìm thấy y tá"
+            }, status=status.HTTP_404_NOT_FOUND)
 
-        # ✅ Xoá ảnh cũ
-        old_image_name = data.get("image_name")
-        if old_image_name:
-            old_path = os.path.join(IMAGE_PHARMA, old_image_name)
-            if os.path.exists(old_path):
-                os.remove(old_path)
-
-        # ✅ Xử lý ảnh mới
         image_base64 = data.get("image")
         if image_base64 and image_base64.strip() != "":
             try:
+                # ❌ Xoá ảnh cũ trên Cloudinary nếu có
+                old_image_url = pharmacist.image
+                match = re.search(r'/upload/(?:v\d+/)?(?P<public_id>.+?)\.(?:jpg|jpeg|png|gif|webp)', old_image_url)
+                if match:
+                    public_id = match.group('public_id')  # ví dụ: 'pharmacists/pharmacist_...'
+                    cloudinary.uploader.destroy(public_id)
+
+                # ✅ Xử lý ảnh base64 mới
                 if "base64," in image_base64:
                     format_info, imgstr = image_base64.split(";base64,")
                     mime_type = format_info.split(":")[-1].lower()
@@ -1559,27 +2220,36 @@ def update_pharmacist(request):
                 if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
                     return Response({
                         "errCode": 11,
-                        "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                        "message": f"Định dạng ảnh không hỗ trợ: {ext}"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
                 timestamp = int(time.time())
-                unique_id = uuid.uuid4().hex[:8]
-                file_name = f"{timestamp}-{unique_id}.{ext}"
+                unique_id = uuid.uuid4().hex[:16]
+                cloud_name = f"pharmacist_{timestamp}_{unique_id}"
 
-                os.makedirs(IMAGE_PHARMA, exist_ok=True)
-                image_path = os.path.join(IMAGE_PHARMA, file_name)
-                with open(image_path, "wb") as f:
-                    f.write(base64.b64decode(imgstr))
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=cloud_name,
+                    folder="pharmacists"
+                )
 
-                data["image"] = file_name  # cập nhật ảnh mới vào DB
+                image_url = upload_result.get("secure_url")
+                if image_url:
+                    data["image"] = image_url
+                else:
+                    return Response({
+                        "errCode": 13,
+                        "message": "Không lấy được URL ảnh từ Cloudinary"
+                    }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
             except Exception as e:
                 return Response({
                     "errCode": 12,
-                    "message": "Lỗi xử lý ảnh base64",
+                    "message": "Lỗi xử lý ảnh",
                     "error": str(e)
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-        # ✅ Cập nhật bác sĩ
+        # ✅ Cập nhật thông tin y tá
         serializer = PharmacistSerializer(pharmacist, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -1595,38 +2265,38 @@ def update_pharmacist(request):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    except jwt.ExpiredSignatureError:
-        return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-    except jwt.InvalidTokenError:
-        return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as e:
         return Response({
             "errCode": 99,
             "message": "Lỗi không xác định",
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
 
+        
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @transaction.atomic
 def create_cashier(request):
     try:
         user = request.user
-        if not user.is_authenticated:
-            return Response({"errCode": 3, "message": "Chưa xác thực"}, status=status.HTTP_401_UNAUTHORIZED)
-
         if user.role != 'admin':
-            return Response({"errCode": 4, "message": "Bạn không có quyền tạo thu ngân"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({
+                "errCode": 4,
+                "message": "Bạn không có quyền tạo thu ngân"
+            }, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data.copy()
 
-        # 📌 Kiểm tra email đã tồn tại chưa
+        # 📌 Kiểm tra email trùng
         User = get_user_model()
-        if User.objects.filter(email=data.get("email")).exists():
-            return Response({"errCode": 9, "message": "Email đã được sử dụng"}, status=status.HTTP_400_BAD_REQUEST)
+        email = data.get("email")
+        if User.objects.filter(email=email).exists():
+            return Response({
+                "errCode": 9,
+                "message": "Email đã được sử dụng"
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Xử lý ảnh base64
+        # 📌 Xử lý ảnh base64 & upload Cloudinary
         image_base64 = data.get("image")
         if not image_base64 or image_base64.strip() == "":
             return Response({
@@ -1635,40 +2305,49 @@ def create_cashier(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            # — Tách định dạng & base64
             if "base64," in image_base64:
-                format_info, imgstr = image_base64.split(";base64,")
-                mime_type = format_info.split(":")[-1].lower()
-                ext = mimetypes.guess_extension(mime_type) or '.jpg'
-                ext = ext.lstrip('.')
+                header, imgstr = image_base64.split(";base64,")
+                mime_type = header.split(":")[1].lower()
             else:
                 imgstr = image_base64
-                ext = "jpg"
+                mime_type = "image/jpeg"
 
-            if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+            # — Kiểm tra định dạng hợp lệ
+            allowed_mime_types = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']
+            if mime_type not in allowed_mime_types:
                 return Response({
                     "errCode": 11,
-                    "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                    "message": f"Định dạng ảnh không được hỗ trợ: {mime_type}"
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-            timestamp = int(time.time())
-            unique_id = uuid.uuid4().hex[:8]
-            file_name = f"{timestamp}-{unique_id}.{ext}"
+            # — Tạo public_id duy nhất
+            ts = int(time.time())
+            uid = uuid.uuid4().hex[:8]
+            public_id = f"cashier_{ts}_{uid}"
 
-            os.makedirs(IMAGE_CASHIER, exist_ok=True)
-            image_path = os.path.join(IMAGE_CASHIER, file_name)
-            with open(image_path, "wb") as f:
-                f.write(base64.b64decode(imgstr))
+            # — Upload ảnh
+            upload = cloudinary.uploader.upload(
+                base64.b64decode(imgstr),
+                public_id=public_id,
+                folder="cashiers",
+                resource_type="image"
+            )
 
-            data["image"] = file_name
+            secure_url = upload.get("secure_url")
+            if not secure_url:
+                raise Exception("Không lấy được URL từ Cloudinary")
+
+            data["image"] = secure_url
 
         except Exception as e:
             return Response({
                 "errCode": 12,
-                "message": "Lỗi xử lý ảnh base64",
+                "message": "Lỗi xử lý ảnh base64 hoặc upload ảnh",
                 "error": str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Tạo user mới cho thu ngân
+        # 📌 Tạo user mới
         new_user = User.objects.create_user(
             email=data.get("email"),
             password=data.get("password"),
@@ -1676,6 +2355,7 @@ def create_cashier(request):
         )
         data["user"] = new_user.id
 
+        # 📌 Tạo cashier
         serializer = CashierSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
@@ -1685,6 +2365,7 @@ def create_cashier(request):
                 "data": serializer.data
             }, status=status.HTTP_201_CREATED)
 
+        # ❌ Nếu lỗi => rollback user đã tạo
         new_user.delete()
         return Response({
             "errCode": 1,
@@ -1693,7 +2374,6 @@ def create_cashier(request):
         }, status=status.HTTP_400_BAD_REQUEST)
 
     except Exception as e:
-        logger.error(f"Lỗi tạo thu ngân: {e}")
         return Response({
             "errCode": 2,
             "message": "Lỗi hệ thống",
@@ -1752,21 +2432,6 @@ def get_cashier(request):
         cashier = Cashier.objects.get(id=cashier_id)
 
         data = model_to_dict(cashier)
-
-        # Đọc ảnh và chuyển sang base64 định dạng chuẩn
-        data['image_name']=cashier.image
-        image_base64 = ""
-        if cashier.image:
-            image_path = os.path.join(IMAGE_CASHIER, cashier.image)
-            if os.path.exists(image_path):
-                mime_type, _ = mimetypes.guess_type(image_path)
-                if mime_type:
-                    with open(image_path, 'rb') as img_file:
-                        encoded = base64.b64encode(img_file.read()).decode('utf-8')
-                        image_base64 = f"data:{mime_type};base64,{encoded}"
-
-        data['image'] = image_base64
-
         return Response({
             "errCode": 0,
             "message": "Lấy y tá thành công",
@@ -1794,31 +2459,28 @@ def get_cashier(request):
 @permission_classes([IsAuthenticated])
 def get_cashier_by_token(request):
     try:
-        user = request.user  # <-- Đã có user ở đây
-        cashier = Cashier.objects.filter(user=user).first()
+        user = request.user  # Lấy từ token
 
-        if cashier:
-            data = {
-                "name": cashier.name
-            }
-        else:
-            data = {}
+        # Cố gắng truy ra y tá
+        try:
+            cashier = Cashier.objects.get(user_id=user.id)
+            data = model_to_dict(cashier)
+        except cashier.DoesNotExist:
+            data = {}  # Không có y tá, trả về rỗng
 
         return Response({
             "errCode": 0,
-            "message": "Truy vấn thành công",
-            "method": request.method,
+            "message": "Lấy thông tin y tá thành công",
             "data": data
-        })
+        }, status=200)
 
     except Exception as e:
         return Response({
             "errCode": 2,
             "message": "Lỗi hệ thống",
-            "method": request.method,
             "error": str(e),
             "data": {}
-        }, status=500) 
+        }, status=500)
 
 
 
@@ -1827,14 +2489,11 @@ def get_cashier_by_token(request):
 def get_doctor_by_token(request):
     try:
         user = request.user  # <-- Đã có user ở đây
-        doctor = Doctor.objects.filter(user=user).first()
-
-        if doctor:
-            data = {
-                "name": doctor.name
-            }
-        else:
-            data = {}
+        try:
+            doctor = Doctor.objects.filter(user=user).first()
+            data = model_to_dict(doctor)
+        except doctor.DoesNotExist:
+            data = {}  
 
         return Response({
             "errCode": 0,
@@ -1851,65 +2510,33 @@ def get_doctor_by_token(request):
             "error": str(e),
             "data": {}
         }, status=500) 
-
+       
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_technician_by_token(request):
     try:
-        user = request.user  # <-- Đã có user ở đây
-        tech = Technician.objects.filter(user=user).first()
+        user = request.user  # Lấy từ token
 
-        if tech:
-            data = {
-                "name": tech.name
-            }
-        else:
-            data = {}
+        # Cố gắng truy ra y tá
+        try:
+            tech = Technician.objects.get(user_id=user.id)
+            data = model_to_dict(tech)
+        except tech.DoesNotExist:
+            data = {}  # Không có y tá, trả về rỗng
 
         return Response({
             "errCode": 0,
-            "message": "Truy vấn thành công",
-            "method": request.method,
+            "message": "Lấy thông tin y tá thành công",
             "data": data
-        })
+        }, status=200)
 
     except Exception as e:
         return Response({
             "errCode": 2,
             "message": "Lỗi hệ thống",
-            "method": request.method,
             "error": str(e),
             "data": {}
-        }, status=500) 
-        
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def get_pharmacist_by_token(request):
-    try:
-        user = request.user  # <-- Đã có user ở đây
-        phar = Pharmacist.objects.filter(user=user).first()
-
-        if phar:
-            data = {
-                "name": phar.name
-            }
-        else:
-            data = {}
-
-        return Response({
-            "errCode": 0,
-            "message": "Truy vấn thành công",
-            "data": data
-        })
-
-    except Exception as e:
-        return Response({
-            "errCode": 2,
-            "message": "Lỗi hệ thống",
-            "method": request.method,
-            "data": {}
-        }, status=500) 
+        }, status=500)
         
           
 @api_view(['GET'])
@@ -1948,84 +2575,99 @@ def get_cashier_by_user(request):
             "error": str(e),
             "data": {}
         }, status=500)
-      
+
+
 @api_view(['PUT'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def update_cashier(request):
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
-
-        token = auth_header.split(" ")[1]
-        decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-        user_id = decoded.get('user_id')
-
-        User = get_user_model()
-        user = User.objects.get(id=user_id)
-
+        # 1️⃣ Kiểm tra quyền người dùng
+        user = request.user
         if user.role != 'admin':
-            return Response({"errCode": 4, "message": "Bạn không có quyền cập nhật bác sĩ"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({
+                "errCode": 4,
+                "message": "Bạn không có quyền cập nhật thu ngân"
+            }, status=status.HTTP_403_FORBIDDEN)
 
+        # 2️⃣ Lấy dữ liệu và tìm cashier
         data = request.data.copy()
         cashier_id = data.get("id")
         if not cashier_id:
-            return Response({"errCode": 5, "message": "Thiếu id bác sĩ"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "errCode": 5,
+                "message": "Thiếu id thu ngân"
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         cashier = Cashier.objects.filter(id=cashier_id).first()
         if not cashier:
-            return Response({"errCode": 6, "message": "Không tìm thấy bác sĩ"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "errCode": 6,
+                "message": "Không tìm thấy thu ngân"
+            }, status=status.HTTP_404_NOT_FOUND)
 
-        # ✅ Xoá ảnh cũ
-        old_image_name = data.get("image_name")
-        if old_image_name:
-            old_path = os.path.join(IMAGE_CASHIER, old_image_name)
-            if os.path.exists(old_path):
-                os.remove(old_path)
-
-        # ✅ Xử lý ảnh mới
+        # 3️⃣ Xử lý ảnh base64 & Cloudinary
         image_base64 = data.get("image")
         if image_base64 and image_base64.strip() != "":
             try:
+                # — Xoá ảnh cũ nếu có
+                old_url = cashier.image or ""
+                match = re.search(
+                    r'/upload/(?:v\d+/)?(?P<public_id>.+?)\.(?:jpg|jpeg|png|gif|webp)',
+                    old_url
+                )
+                if match:
+                    cloudinary.uploader.destroy(match.group('public_id'))
+
+                # — Tách định dạng và base64
                 if "base64," in image_base64:
-                    format_info, imgstr = image_base64.split(";base64,")
-                    mime_type = format_info.split(":")[-1].lower()
-                    ext = mimetypes.guess_extension(mime_type) or '.jpg'
-                    ext = ext.lstrip('.')
+                    header, imgstr = image_base64.split(";base64,")
+                    mime_type = header.split(":")[1].lower()
                 else:
                     imgstr = image_base64
-                    ext = "jpg"
+                    mime_type = "image/jpeg"
 
-                if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+                # — Kiểm tra MIME hợp lệ
+                allowed_mime_types = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']
+                if mime_type not in allowed_mime_types:
                     return Response({
                         "errCode": 11,
-                        "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                        "message": f"Định dạng ảnh không hỗ trợ: {mime_type}"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
-                timestamp = int(time.time())
-                unique_id = uuid.uuid4().hex[:8]
-                file_name = f"{timestamp}-{unique_id}.{ext}"
+                # — Tạo public_id duy nhất
+                ts = int(time.time())
+                uid = uuid.uuid4().hex[:8]
+                public_id = f"cashier_{ts}_{uid}"
 
-                os.makedirs(IMAGE_CASHIER, exist_ok=True)
-                image_path = os.path.join(IMAGE_CASHIER, file_name)
-                with open(image_path, "wb") as f:
-                    f.write(base64.b64decode(imgstr))
+                # — Upload ảnh
+                upload = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=public_id,
+                    folder="cashiers",
+                    resource_type="image"
+                )
 
-                data["image"] = file_name  # cập nhật ảnh mới vào DB
+                secure_url = upload.get("secure_url")
+                if not secure_url:
+                    raise Exception("Không lấy được URL từ Cloudinary")
+
+                data["image"] = secure_url  # cập nhật ảnh mới
+
             except Exception as e:
                 return Response({
                     "errCode": 12,
-                    "message": "Lỗi xử lý ảnh base64",
+                    "message": "Lỗi xử lý ảnh base64 hoặc upload ảnh",
                     "error": str(e)
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-        # ✅ Cập nhật bác sĩ
+        # 4️⃣ Cập nhật thông tin thu ngân
         serializer = CashierSerializer(cashier, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
             return Response({
                 "errCode": 0,
-                "message": "Cập nhật y tá thành công",
+                "message": "Cập nhật thu ngân thành công",
                 "data": serializer.data
             }, status=status.HTTP_200_OK)
 
@@ -2035,16 +2677,13 @@ def update_cashier(request):
             "errors": serializer.errors
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    except jwt.ExpiredSignatureError:
-        return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-    except jwt.InvalidTokenError:
-        return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
     except Exception as e:
         return Response({
             "errCode": 99,
             "message": "Lỗi không xác định",
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 
 
@@ -2107,7 +2746,8 @@ def get_select_all_nurse(request):
             "error": str(e),
             "data": []
         }, status=500)
-  
+
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_all_doctor_home(request):
@@ -2116,24 +2756,18 @@ def get_all_doctor_home(request):
         doctor_list = []
 
         for doc in doctors:
-            image_path = os.path.join(IMAGE_DOCTOR, doc.image or "")
-            image_base64 = None
+            image_url = None
 
-            if os.path.isfile(image_path):
-                mime_type, _ = mimetypes.guess_type(image_path)
-                with open(image_path, 'rb') as img_file:
-                    base64_str = base64.b64encode(img_file.read()).decode('utf-8')
-                    if mime_type:
-                        image_base64 = f"data:{mime_type};base64,{base64_str}"
-                    else:
-                        image_base64 = base64_str
+            if doc.image:
+                # Giả sử bạn lưu ảnh trên Cloud và đường dẫn ảnh là URL từ cloud
+                image_url = doc.image  # Đây là URL ảnh từ cloud
 
             doctor_list.append({
                 "id": doc.id,
                 "name": doc.name,
                 "user_id": doc.user_id,
                 "degree": doc.degree,
-                "image": image_base64,
+                "image": image_url,
             })
 
         return Response({
@@ -2151,6 +2785,7 @@ def get_all_doctor_home(request):
             "error": str(e),
             "data": []
         }, status=500)
+
         
         
 @api_view(['GET'])
@@ -2167,20 +2802,6 @@ def get_doctor_by_user_id(request):
         doctor = Doctor.objects.get(user_id=userId)
 
         data = model_to_dict(doctor)
-
-        # Đọc ảnh và chuyển sang base64 định dạng chuẩn
-        data['image_name']=doctor.image
-        image_base64 = ""
-        if doctor.image:
-            image_path = os.path.join(IMAGE_DOCTOR, doctor.image)
-            if os.path.exists(image_path):
-                mime_type, _ = mimetypes.guess_type(image_path)
-                if mime_type:
-                    with open(image_path, 'rb') as img_file:
-                        encoded = base64.b64encode(img_file.read()).decode('utf-8')
-                        image_base64 = f"data:{mime_type};base64,{encoded}"
-
-        data['image'] = image_base64
 
         return Response({
             "errCode": 0,
@@ -2205,37 +2826,15 @@ def get_doctor_by_user_id(request):
             "data": {}
         }, status=500)
 
-
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def create_patient_record(request):
     try:
-        # 📌 Lấy token từ header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
+        user = request.user
 
-        token = auth_header.split(" ")[1]
-
-        try:
-            decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            user_id = decoded.get('user_id')
-            if not user_id:
-                return Response({"errCode": 7, "message": "Token không chứa user_id"}, status=status.HTTP_401_UNAUTHORIZED)
-
-            User = get_user_model()
-            user = User.objects.get(id=user_id)
-
-        except jwt.ExpiredSignatureError:
-            return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-        except jwt.InvalidTokenError:
-            return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
-        except User.DoesNotExist:
-            return Response({"errCode": 8, "message": "Người dùng không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
-
-        # 📌 Chuẩn bị dữ liệu gửi sang serializer
         data = request.data.copy()
-        data["user"] = user_id  # Gán ID người dùng vào trường user (ForeignKey)
+        data["user"] = user.id
 
         # 📌 Xử lý ảnh base64
         image_base64 = data.get("image")
@@ -2246,40 +2845,49 @@ def create_patient_record(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            # — Tách định dạng & nội dung base64
             if "base64," in image_base64:
-                format_info, imgstr = image_base64.split(";base64,")
-                mime_type = format_info.split(":")[-1].lower()
-                ext = mimetypes.guess_extension(mime_type) or '.jpg'
-                ext = ext.lstrip('.')
+                header, imgstr = image_base64.split(";base64,")
+                mime_type = header.split(":")[1].lower()
             else:
                 imgstr = image_base64
-                ext = "jpg"
+                mime_type = "image/jpeg"
 
-            if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+            # — Kiểm tra định dạng hợp lệ
+            allowed_mime_types = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']
+            if mime_type not in allowed_mime_types:
                 return Response({
                     "errCode": 11,
-                    "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                    "message": f"Định dạng ảnh không được hỗ trợ: {mime_type}"
                 }, status=status.HTTP_400_BAD_REQUEST)
 
+            # — Tạo tên ảnh duy nhất
             timestamp = int(time.time())
             unique_id = uuid.uuid4().hex[:8]
-            file_name = f"{timestamp}-{unique_id}.{ext}"
+            public_id = f"patient_{timestamp}_{unique_id}"
 
-            os.makedirs(IMAGE_PATIENT, exist_ok=True)
-            image_path = os.path.join(IMAGE_PATIENT, file_name)
-            with open(image_path, "wb") as f:
-                f.write(base64.b64decode(imgstr))
+            # — Upload lên Cloudinary
+            upload_result = cloudinary.uploader.upload(
+                base64.b64decode(imgstr),
+                public_id=public_id,
+                folder="patients",
+                resource_type="image"
+            )
 
-            data["image"] = file_name  # Gán tên ảnh mới vào data
+            secure_url = upload_result.get("secure_url")
+            if not secure_url:
+                raise Exception("Không lấy được URL từ Cloudinary")
+
+            data["image"] = secure_url
 
         except Exception as e:
             return Response({
                 "errCode": 12,
-                "message": "Lỗi xử lý ảnh base64",
+                "message": "Lỗi xử lý ảnh base64 hoặc upload ảnh",
                 "error": str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        # 📌 Gửi sang serializer để lưu Nurse
+        # 📌 Tạo hồ sơ bệnh nhân
         serializer = PatientSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
@@ -2296,7 +2904,6 @@ def create_patient_record(request):
         }, status=status.HTTP_400_BAD_REQUEST)
 
     except Exception as e:
-        logger.error(f"Lỗi tạo Hồ sơ bẹnh nhân: {e}")
         return Response({
             "errCode": 2,
             "message": "Lỗi hệ thống",
@@ -2313,31 +2920,10 @@ def get_all_patient_records_by_user(request):
 
         patients = Patient.objects.filter(user_id=user_id).values("id", "name", "date_of_birth", "image")
 
-        result = []
-        for patient in patients:
-            data = {
-                "id": patient["id"],
-                "name": patient["name"],
-                "date_of_birth": patient["date_of_birth"],
-                "image_name": patient["image"],
-                "image": ""
-            }
-
-            if patient["image"]:
-                image_path = os.path.join(IMAGE_PATIENT, patient["image"])
-                if os.path.exists(image_path):
-                    mime_type, _ = mimetypes.guess_type(image_path)
-                    if mime_type:
-                        with open(image_path, "rb") as img_file:
-                            encoded = base64.b64encode(img_file.read()).decode("utf-8")
-                            data["image"] = f"data:{mime_type};base64,{encoded}"
-
-            result.append(data)
-
         return Response({
             "errCode": 0,
             "message": "Lấy danh sách hồ sơ bệnh nhân thành công",
-            "data": result
+            "data": patients
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -2347,162 +2933,113 @@ def get_all_patient_records_by_user(request):
             "message": "Lỗi hệ thống",
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def get_patient_record_by_id(request):
     try:
-        # Lấy token từ header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
+        user = request.user
 
-        token = auth_header.split(" ")[1]
-
-        try:
-            decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            user_id = decoded.get('user_id')
-            if not user_id:
-                return Response({"errCode": 7, "message": "Token không chứa user_id"}, status=status.HTTP_401_UNAUTHORIZED)
-
-            User = get_user_model()
-            user = User.objects.get(id=user_id)  # Kiểm tra user tồn tại
-
-        except jwt.ExpiredSignatureError:
-            return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-        except jwt.InvalidTokenError:
-            return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
-        except User.DoesNotExist:
-            return Response({"errCode": 8, "message": "Người dùng không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
-
-        # Lấy id từ query string
-        patient_id = request.GET.get('id')  # Lấy giá trị id từ query string
-
+        # Lấy id bệnh nhân từ query string
+        patient_id = request.GET.get('id')
         if not patient_id:
-            return Response({"errCode": 1, "message": "Thiếu tham số id trong query string"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "errCode": 1,
+                "message": "Thiếu tham số id trong query string"
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Lấy hồ sơ bệnh nhân theo user_id và patient_id
-        patient = Patient.objects.filter(user_id=user_id, id=patient_id).first()
-
+        # Lọc bệnh nhân theo id và user
+        patient = Patient.objects.filter(user_id=user.id, id=patient_id).first()
         if not patient:
-            return Response({"errCode": 9, "message": "Bệnh nhân không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({
+                "errCode": 9,
+                "message": "Bệnh nhân không tồn tại"
+            }, status=status.HTTP_404_NOT_FOUND)
 
         # Serialize dữ liệu
-        patient_data = PatientSerializer(patient).data
-
-        # Trả về hình ảnh base64 và tên tệp hình ảnh gốc
-        if patient.image:
-            image_path = os.path.join(IMAGE_PATIENT, patient.image)
-            
-            # Xử lý hình ảnh base64
-            if os.path.exists(image_path):
-                mime_type, _ = mimetypes.guess_type(image_path)
-                if mime_type:
-                    with open(image_path, "rb") as img_file:
-                        encoded = base64.b64encode(img_file.read()).decode("utf-8")
-                        patient_data["image"] = f"data:{mime_type};base64,{encoded}"
-            
-            # Thêm trường 'image_name' chứa tên tệp gốc
-            patient_data["image_name"] = patient.image
+        serializer = PatientSerializer(patient)
 
         return Response({
             "errCode": 0,
             "message": "Lấy hồ sơ bệnh nhân thành công",
-            "data": patient_data
+            "data": serializer.data
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
-        logger.error(f"Lỗi khi lấy hồ sơ bệnh nhân: {e}")
         return Response({
             "errCode": 2,
             "message": "Lỗi hệ thống",
             "error": str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+        
 @api_view(['PUT'])
+@permission_classes([IsAuthenticated])
 @transaction.atomic
 def update_patient_record(request):
     try:
-        # 📌 Lấy token từ header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return Response({"errCode": 3, "message": "Thiếu hoặc sai định dạng token"}, status=status.HTTP_401_UNAUTHORIZED)
-
-        token = auth_header.split(" ")[1]
-
-        try:
-            decoded = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-            user_id = decoded.get('user_id')
-            if not user_id:
-                return Response({"errCode": 7, "message": "Token không chứa user_id"}, status=status.HTTP_401_UNAUTHORIZED)
-
-            User = get_user_model()
-            user = User.objects.get(id=user_id)
-
-        except jwt.ExpiredSignatureError:
-            return Response({"errCode": 5, "message": "Token đã hết hạn"}, status=status.HTTP_401_UNAUTHORIZED)
-        except jwt.InvalidTokenError:
-            return Response({"errCode": 6, "message": "Token không hợp lệ"}, status=status.HTTP_401_UNAUTHORIZED)
-        except User.DoesNotExist:
-            return Response({"errCode": 8, "message": "Người dùng không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
-
-        # 📌 Lấy ID hồ sơ cần sửa từ body
+        user = request.user
         data = request.data.copy()
         patient_id = data.get("id")
 
         if not patient_id:
             return Response({"errCode": 1, "message": "Thiếu ID bệnh nhân"}, status=status.HTTP_400_BAD_REQUEST)
 
-        patient = Patient.objects.filter(id=patient_id, user_id=user_id).first()
+        patient = Patient.objects.filter(id=patient_id, user_id=user.id).first()
         if not patient:
             return Response({"errCode": 9, "message": "Hồ sơ bệnh nhân không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
 
-        # 📌 Xoá ảnh cũ nếu có image_name
-        old_image_name = data.get("image_name")
-        if old_image_name:
-            old_image_path = os.path.join(IMAGE_PATIENT, old_image_name)
-            if os.path.exists(old_image_path):
-                os.remove(old_image_path)
-
-        # 📌 Xử lý ảnh base64 mới nếu có
+        # 📌 Xử lý ảnh mới nếu có
         image_base64 = data.get("image")
         if image_base64 and image_base64.strip() != "":
             try:
+                # Tách định dạng & nội dung base64
                 if "base64," in image_base64:
-                    format_info, imgstr = image_base64.split(";base64,")
-                    mime_type = format_info.split(":")[-1].lower()
-                    ext = mimetypes.guess_extension(mime_type) or '.jpg'
-                    ext = ext.lstrip('.')
+                    header, imgstr = image_base64.split(";base64,")
+                    mime_type = header.split(":")[1].lower()
                 else:
                     imgstr = image_base64
-                    ext = "jpg"
+                    mime_type = "image/jpeg"
 
-                if ext not in ['png', 'jpg', 'jpeg', 'webp', 'gif']:
+                # Kiểm tra định dạng hợp lệ
+                allowed_mime_types = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/gif']
+                if mime_type not in allowed_mime_types:
                     return Response({
                         "errCode": 11,
-                        "message": f"Định dạng ảnh không được hỗ trợ: {ext}"
+                        "message": f"Định dạng ảnh không được hỗ trợ: {mime_type}"
                     }, status=status.HTTP_400_BAD_REQUEST)
 
+                # Xoá ảnh cũ nếu tồn tại (URL Cloudinary)
+                if patient.image and "cloudinary.com" in patient.image:
+                    public_id = patient.image.split("/")[-1].split(".")[0]
+                    cloudinary.uploader.destroy(f"patients/{public_id}")
+
+                # Upload ảnh mới lên Cloudinary
                 timestamp = int(time.time())
                 unique_id = uuid.uuid4().hex[:8]
-                file_name = f"{timestamp}-{unique_id}.{ext}"
+                public_id = f"patient_{timestamp}_{unique_id}"
 
-                os.makedirs(IMAGE_PATIENT, exist_ok=True)
-                image_path = os.path.join(IMAGE_PATIENT, file_name)
-                with open(image_path, "wb") as f:
-                    f.write(base64.b64decode(imgstr))
+                upload_result = cloudinary.uploader.upload(
+                    base64.b64decode(imgstr),
+                    public_id=public_id,
+                    folder="patients",
+                    resource_type="image"
+                )
 
-                data["image"] = file_name  # Gán tên file ảnh mới
+                secure_url = upload_result.get("secure_url")
+                if not secure_url:
+                    raise Exception("Không lấy được URL từ Cloudinary")
+
+                data["image"] = secure_url
+
             except Exception as e:
                 return Response({
                     "errCode": 12,
-                    "message": "Lỗi xử lý ảnh base64",
+                    "message": "Lỗi xử lý hoặc upload ảnh",
                     "error": str(e)
                 }, status=status.HTTP_400_BAD_REQUEST)
         else:
-            data["image"] = patient.image  # Không gửi ảnh mới thì giữ lại ảnh cũ
+            data["image"] = patient.image  # Không có ảnh mới thì giữ nguyên ảnh cũ
 
-        # 📌 Cập nhật dữ liệu
+        # 📌 Cập nhật dữ liệu bệnh nhân
         serializer = PatientSerializer(patient, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -2519,7 +3056,6 @@ def update_patient_record(request):
         }, status=status.HTTP_400_BAD_REQUEST)
 
     except Exception as e:
-        logger.error(f"Lỗi cập nhật hồ sơ bệnh nhân: {e}")
         return Response({
             "errCode": 2,
             "message": "Lỗi hệ thống",

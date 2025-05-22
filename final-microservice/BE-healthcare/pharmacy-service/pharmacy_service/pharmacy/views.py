@@ -2,6 +2,8 @@ import os
 import time
 import uuid
 import json
+import base64
+import mimetypes
 import requests
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -11,7 +13,7 @@ from .models import Prescription, PrescriptionMedicine, Medicine,PaymentMethod,I
 from django.db import transaction
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
-
+import cloudinary.uploader
 
 
 IMAGE_INVOICE = r"D:\final-microservice\image\invoice"
@@ -79,97 +81,68 @@ def get_all_medicines_active(request):
 @transaction.atomic
 def create_prescription_and_prescription_medicines(request):
     try:
-        # ✅ Kiểm tra Authorization và xác thực role bác sĩ
+        # ✅ 1. Kiểm tra token
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
-            return Response({
-                'errCode': 2,
-                'message': 'Thiếu hoặc sai định dạng token',
-                'data': []
-            }, status=status.HTTP_401_UNAUTHORIZED)
-
+            return Response({'errCode': 2, 'message': 'Thiếu hoặc sai token'}, status=401)
         token = auth_header.split(' ')[1]
 
-        # Xác thực vai trò bác sĩ
+        # ✅ 2. Kiểm tra vai trò bác sĩ
         response = requests.get(
             f"{URL_USER_SV}/api/u/check-role-doctor",
             headers={'Authorization': f'Bearer {token}'}
         )
+        if response.status_code != 200 or response.json().get('errCode') != 0:
+            return Response({'errCode': 1, 'message': 'Không phải bác sĩ'}, status=403)
 
-        if response.status_code != 200:
-            return Response({
-                "errCode": 1,
-                "message": "Không xác thực được vai trò bác sĩ (User Service lỗi)",
-                "data": []
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        response_data = response.json()
-        if response_data.get('errCode') != 0:
-            return Response({
-                "errCode": 1,
-                "message": "Bạn không có quyền truy cập với vai trò bác sĩ",
-                "data": []
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        # ✅ Lấy và kiểm tra dữ liệu
+        # ✅ 3. Lấy dữ liệu từ request
         medical_id = request.data.get('medical_id')
         note = request.data.get('note', '')
         image_file = request.FILES.get('image')
         medicines_data = request.data.get('prescription_medicines')
 
         if not medical_id or not image_file or not medicines_data:
-            return Response({"errCode": 1, "message": "Thiếu thông tin bắt buộc"}, status=400)
+            return Response({'errCode': 1, 'message': 'Thiếu thông tin bắt buộc'}, status=400)
 
-        # ✅ Gọi API để thay đổi trạng thái lịch hẹn (done) trước khi tạo đơn thuốc
-        change_status_response = requests.put(
-            f"{URL_APPT_SV}/api/a/change-status-appointment",
-            json={
-                'medical_id': medical_id,
-                'status': 'done'
-            }
-        )
-
-        if change_status_response.status_code != 200:
-            return Response({
-                "errCode": 1,
-                "message": "Không thể cập nhật trạng thái lịch hẹn",
-                "data": []
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-        # ✅ Kiểm tra định dạng ảnh
+        # ✅ 4. Kiểm tra định dạng ảnh
         ext = os.path.splitext(image_file.name)[-1].lower()
         if ext not in ['.png', '.jpg', '.jpeg', '.webp', '.gif']:
-            return Response({"errCode": 11, "message": f"Định dạng ảnh không hỗ trợ: {ext}"}, status=400)
+            return Response({'errCode': 11, 'message': f'Định dạng ảnh không hỗ trợ: {ext}'}, status=400)
 
-        os.makedirs(IMAGE_PRES, exist_ok=True)
-        file_name = f"{int(time.time())}-{uuid.uuid4().hex[:8]}{ext}"
-        file_path = os.path.join(IMAGE_PRES, file_name)
+        # ✅ 5. Upload ảnh lên Cloudinary (vào thư mục 'prescriptions')
+        file_name = f"prescription_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        upload_result = cloudinary.uploader.upload(
+            image_file,
+            public_id=file_name,
+            folder="prescriptions",           # 🔥 Chỉ định đúng thư mục
+            resource_type="image",
+            overwrite=True
+        )
+        cloudinary_url = upload_result.get('secure_url')
 
-        with open(file_path, "wb+") as dest:
-            for chunk in image_file.chunks():
-                dest.write(chunk)
-
-        # ✅ Tạo đơn thuốc
+        # ✅ 6. Tạo đơn thuốc
         prescription_data = {
             'medical_id': medical_id,
             'note': note,
-            'image': file_name
+            'image': cloudinary_url
         }
-
         prescription_serializer = PrescriptionSerializer(data=prescription_data)
         if not prescription_serializer.is_valid():
             return Response({
-                "errCode": 2,
-                "message": "Dữ liệu đơn thuốc không hợp lệ",
-                "errors": prescription_serializer.errors
+                'errCode': 2,
+                'message': 'Dữ liệu đơn thuốc không hợp lệ',
+                'errors': prescription_serializer.errors
             }, status=400)
-
         prescription_serializer.save()
 
-        # ✅ Tạo các thuốc trong đơn
-        medicines_list = json.loads(medicines_data)
+        # ✅ 7. Tạo các thuốc trong đơn
+        try:
+            medicines_list = json.loads(medicines_data)
+        except Exception as e:
+            return Response({'errCode': 4, 'message': 'Dữ liệu thuốc không hợp lệ (không parse được JSON)'}, status=400)
+
         for item in medicines_list:
-            prescription_medicine_data = {
+            pres_medicine_data = {
                 'prescription': prescription_serializer.instance.id,
                 'medicine': item.get('id'),
                 'price': item.get('price'),
@@ -177,23 +150,28 @@ def create_prescription_and_prescription_medicines(request):
                 'directions_for_use': item.get('directions_for_use')
             }
 
-            prescription_medicine_serializer = PrescriptionMedicineSerializer(data=prescription_medicine_data)
-            if not prescription_medicine_serializer.is_valid():
+            pres_medicine_serializer = PrescriptionMedicineSerializer(data=pres_medicine_data)
+            if not pres_medicine_serializer.is_valid():
                 return Response({
-                    "errCode": 3,
-                    "message": "Dữ liệu thuốc không hợp lệ",
-                    "errors": prescription_medicine_serializer.errors
+                    'errCode': 3,
+                    'message': 'Dữ liệu thuốc không hợp lệ',
+                    'errors': pres_medicine_serializer.errors
                 }, status=400)
 
-            prescription_medicine_serializer.save()
+            pres_medicine_serializer.save()
 
-        return Response({"errCode": 0, "message": "Tạo đơn thuốc thành công"}, status=201)
+        # ✅ 8. Gọi API cập nhật trạng thái appointment
+        status_res = requests.put(
+            f"{URL_APPT_SV}/api/a/change-status-appointment",
+            json={'medical_id': medical_id, 'status': 'done'}
+        )
+        if status_res.status_code != 200:
+            return Response({'errCode': 5, 'message': 'Không cập nhật được trạng thái'}, status=500)
+
+        return Response({'errCode': 0, 'message': 'Tạo đơn thuốc thành công'}, status=201)
 
     except Exception as e:
-        return Response({
-            "errCode": 500,
-            "message": f"Lỗi hệ thống: {str(e)}"
-        }, status=500)
+        return Response({'errCode': 500, 'message': f'Lỗi hệ thống: {str(e)}'}, status=500)
 
 
 
@@ -227,6 +205,7 @@ def get_prescription_by_medical_id(request):
             "status": prescription.status,
             "note": prescription.note,
             "created_at": prescription.created_at,
+            "image":prescription.image,
             "medicines": []
         }
 
@@ -275,7 +254,6 @@ def get_active_payment_methods(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 
-
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
 @transaction.atomic
@@ -288,6 +266,7 @@ def create_invoice(request):
         }, status=status.HTTP_400_BAD_REQUEST)
 
     try:
+        # Kiểm tra vai trò pharmacist
         response = requests.get(
             f"{URL_USER_SV}/api/u/check-role-pharmacist",
             headers={'Authorization': token}
@@ -307,6 +286,7 @@ def create_invoice(request):
     pharmacist_id = response.json().get('user_id')
 
     try:
+        # Lấy dữ liệu từ request
         prescription_id = request.data.get('prescription_id')
         totals = request.data.get('totals')
         payment_method_id = request.data.get('payment_method_id')
@@ -319,6 +299,7 @@ def create_invoice(request):
                 "message": "Không có ảnh được gửi lên"
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Kiểm tra định dạng ảnh
         ext = os.path.splitext(image_file.name)[-1].lower()
         if ext not in ['.png', '.jpg', '.jpeg', '.webp', '.gif']:
             return Response({
@@ -326,41 +307,83 @@ def create_invoice(request):
                 "message": f"Định dạng ảnh không hỗ trợ: {ext}"
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        # Upload ảnh lên Cloudinary (vào thư mục 'invoices')
         timestamp = int(time.time())
         unique_id = uuid.uuid4().hex[:8]
-        file_name = f"{timestamp}-{unique_id}{ext}"
+        file_name = f"invoice_{timestamp}-{unique_id}"
 
-        os.makedirs(IMAGE_INVOICE, exist_ok=True)
-        image_path = os.path.join(IMAGE_INVOICE, file_name)
-        with open(image_path, 'wb+') as f:
-            for chunk in image_file.chunks():
-                f.write(chunk)
+        upload_result = cloudinary.uploader.upload(
+            image_file,
+            public_id=file_name,
+            folder="invoices",  # Lưu ảnh vào thư mục 'invoices' trên Cloudinary
+            resource_type="image",
+            overwrite=True
+        )
+        cloudinary_url = upload_result.get('secure_url')
 
+        # Tạo hóa đơn
         invoice = Invoice.objects.create(
             pharmacist_id=pharmacist_id,
             totals=totals,
             prescription_id=prescription_id,
             payment_method_id=payment_method_id,
-            image=file_name
+            image=cloudinary_url  # Lưu URL ảnh từ Cloudinary
         )
 
+        # Cập nhật trạng thái của đơn thuốc
         prescription = Prescription.objects.get(id=prescription_id)
         prescription.status = 'sold'
         prescription.save()
 
+        # Cập nhật trạng thái của từng thuốc trong đơn thuốc và trừ stock
         for item in list_pres_med:
             pres_med_id = item.get('prescription_medicine_id')
+            medicine_id = item.get('medicine_id')
+            quantity = item.get('quantity')
+
             try:
+                # Chuyển stock_sold từ chuỗi thành kiểu int
+                quantity = int(quantity)
+                
+                # Cập nhật trạng thái PrescriptionMedicine
                 pres_med = PrescriptionMedicine.objects.get(id=pres_med_id)
                 pres_med.status = 'sold'
                 pres_med.save()
             except PrescriptionMedicine.DoesNotExist:
                 continue
+            except ValueError:
+                return Response({
+                    "errCode": 13,
+                    "message": f"Giá trị stock không hợp lệ cho prescription_medicine_id {pres_med_id}"
+                }, status=status.HTTP_400_BAD_REQUEST)
 
+            try:
+                # Cập nhật stock thuốc
+                medicine = Medicine.objects.get(id=medicine_id)
+
+                if medicine.stock < quantity:
+                    return Response({
+                        "errCode": 12,
+                        "message": f"Không đủ thuốc trong kho cho {medicine.name}"
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
+                # Trừ đi stock đã bán
+                medicine.stock -= quantity
+                medicine.save()
+            except Medicine.DoesNotExist:
+                continue
+            except ValueError:
+                return Response({
+                    "errCode": 13,
+                    "message": f"Giá trị stock không hợp lệ cho medicine_id {medicine_id}"
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Trả về thành công khi đã xử lý xong tất cả
         return Response({
             "errCode": 0,
             "message": "Tạo hóa đơn thành công"
         })
+
 
     except Exception as e:
         return Response({
@@ -369,3 +392,43 @@ def create_invoice(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+
+@api_view(['GET'])
+def get_image_prescription_by_medical_id(request):
+    medical_id = request.GET.get('medical_id')
+
+    if not medical_id:
+        return Response({
+            "errCode": 1,
+            "message": "medical_id is required"
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    prescription = Prescription.objects.filter(medical_id=medical_id).first()
+
+    if not prescription:
+        return Response({
+            "errCode": 2,
+            "message": "Prescription not found"
+        }, status=status.HTTP_404_NOT_FOUND)
+
+    # Xử lý ảnh nếu có
+    if prescription.image:
+        image_path = os.path.join(IMAGE_PRES, prescription.image)
+        if os.path.exists(image_path):
+            with open(image_path, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+                mime_type, _ = mimetypes.guess_type(image_path)
+                if mime_type:
+                    prescription.image = f"data:{mime_type};base64,{encoded}"
+                else:
+                    prescription.image = None
+        else:
+            prescription.image = None
+
+    return Response({
+        "errCode": 0,
+        "message": "Success",
+        "data": {
+            "image": prescription.image,
+        }
+    }, status=status.HTTP_200_OK)

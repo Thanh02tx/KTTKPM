@@ -9,5 +9,6 @@ urlpatterns = [
     path('p/get-prescription-by-medical-id', views.get_prescription_by_medical_id, name='get_prescription_by_medical_id'),
     path('p/get-active-payment-method', views.get_active_payment_methods, name='get_active_payment_methods'),
     path('p/create-invoice', views.create_invoice, name='create_invoice'),
+    path('p/get-image-prescription-by-medical-id', views.get_image_prescription_by_medical_id, name='get_image_prescription_by_medical_id'),
     
 ]

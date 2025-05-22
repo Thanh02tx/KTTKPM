@@ -1,7 +1,9 @@
 from pathlib import Path
 import os
 from dotenv import load_dotenv
-
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -19,11 +21,25 @@ INSTALLED_APPS = [
     # Third-party
     'rest_framework',
     'corsheaders',
-
+    'cloudinary',
+    'cloudinary_storage',
     # Your app
     'bill',
 ]
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.getenv('CLOUD_NAME'),
+    'API_KEY': os.getenv('API_KEY'),
+    'API_SECRET': os.getenv('API_SECRET'),
+}
 
+# ✅ Gọi cloudinary.config để cấu hình
+cloudinary.config(
+    cloud_name=CLOUDINARY_STORAGE['CLOUD_NAME'],
+    api_key=CLOUDINARY_STORAGE['API_KEY'],
+    api_secret=CLOUDINARY_STORAGE['API_SECRET']
+)
+
+DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.AllowAny',

@@ -32,5 +32,7 @@ urlpatterns = [
     path('a/mark-appointment-paid', views.mark_appointment_paid, name='mark_appointment_paid'), 
     path('a/get-appointment-medical-testrequest-paid-by-date', views.get_appointment_medical_testrequest_paid_by_date, name='get_appointment_medical_testrequest_paid_by_date'), 
     path('a/get-history-appointment-by-patient', views.get_history_appointments_by_patient, name='get_history_appointments_by_patient'), 
+    path('a/get-doctor-weekly-schedule', views.get_doctor_weekly_schedule, name='get_doctor_weekly_schedule'), 
+    path('a/get-nurse-weekly-schedule', views.get_nurse_weekly_schedule, name='get_nurse_weekly_schedule'), 
 
 ]
